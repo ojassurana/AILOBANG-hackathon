@@ -16,8 +16,8 @@ Live at **https://ailobang.com**
 | `GET /app` | The post-login **Connect your accounts** page; redirects to `/signin` when signed out |
 | `GET /call` | The call page (a microphone, live transcript, and the voice agent behind them) |
 | `GET /agents/voice-agent/<user id>` | The voice agent's WebSocket; the session cookie decides which agent a caller may reach |
-| `GET /phone` | Link a phone number by SMS code (optional; offered once after sign-in). Links are permanent |
-| `POST /phone/start`, `/phone/verify`, `/phone/restart` | Text a code, check it, or start over with another number |
+| `GET /phone` | Link a phone number with a code read out in a call (optional; offered once after sign-in). Links are permanent |
+| `POST /phone/start`, `/phone/verify`, `/phone/restart` | Call with a code, check it, or start over with another number |
 | `GET /phone/skip` | Skips the post-sign-in phone step and goes to `/app` |
 | `POST /openai/webhook` | OpenAI's `live.transport.incoming` webhook: a call to the US number from a linked number is accepted by that user's voice agent |
 | `GET /connect/<toolkit>` | Creates a Composio Connect Link for that toolkit and redirects to it |
@@ -74,7 +74,11 @@ OpenAI project id, applied with `ignore_for_to_header` so the SIP `To` header st
 number; the webhook uses that to tell these calls from the project's other numbers. OpenAI then posts
 `live.transport.incoming` to `/openai/webhook`, the Worker matches the caller's `From` number to a
 linked user, and that user's `VoiceAgent` accepts the call and attaches a sideband socket to run
-delegations. SMS codes go out through the number's existing messaging profile.
+delegations.
+
+Link codes are read out in an outbound call from the same number, placed through the Telnyx TeXML
+app `ailobang-phone-codes` (`TELNYX_TEXML_APP_ID`) with the TeXML sent inline. They aren't texted:
+the number has no 10DLC registration, and US carriers reject its texts (Telnyx error 40010).
 
 For local development, create `.dev.vars` with those five names set.
 

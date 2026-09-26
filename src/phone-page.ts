@@ -1,5 +1,5 @@
 /**
- * The phone screen: link a number by SMS code so the owner can call in.
+ * The phone screen: link a number with a code read out in a call so the owner can call in.
  *
  * Optional, and offered once right after sign-in. Like the Telegram screen it is
  * plain forms with no script, and the step shown comes from what is stored — a
@@ -195,19 +195,19 @@ function renderStep({ link, pending, callNumber, welcome, notice, noticeTone }: 
   if (pending) {
     return `
         <p class="step"><span class="pill"><span class="dot wait"></span>Step 2 of 2</span></p>
-        <p class="lede">We texted a 6-digit code to <strong>${escapeHtml(formatPhone(pending.phone))}</strong>
-        from ${escapeHtml(number)}.</p>
+        <p class="lede">We're calling <strong>${escapeHtml(formatPhone(pending.phone))}</strong>
+        from ${escapeHtml(number)}. Pick up and we'll read you a 6-digit code.</p>
         ${note}
         <form method="post" action="/phone/verify">
           ${keepWelcome}
-          <label for="code">Code from the text</label>
+          <label for="code">Code from the call</label>
           <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8"
                  pattern="[0-9 ]*" autofocus required />
           <p class="hint">Once you confirm, this number is linked for good. It can't be removed or changed later.</p>
           <div class="actions">
             <button class="btn" type="submit">Link this number</button>
             <button class="link" type="submit" formaction="/phone/start" formnovalidate
-                    name="phone" value="${escapeHtml(pending.phone)}">Send a new code</button>
+                    name="phone" value="${escapeHtml(pending.phone)}">Call me again</button>
             <button class="link" type="submit" formaction="/phone/restart" formnovalidate>Use a different number</button>
           </div>
         </form>`;
@@ -216,7 +216,7 @@ function renderStep({ link, pending, callNumber, welcome, notice, noticeTone }: 
   return `
         <p class="step"><span class="pill"><span class="dot${notice && noticeTone !== "ok" ? " bad" : ""}"></span>Step 1 of 2</span></p>
         <p class="lede">Link your phone number and you can call Ailobang at
-        <strong>${escapeHtml(number)}</strong>, not just from this site. We'll text you a code to
+        <strong>${escapeHtml(number)}</strong>, not just from this site. We'll call you with a code to
         confirm it's yours.</p>
         ${note}
         <form method="post" action="/phone/start">
@@ -226,7 +226,7 @@ function renderStep({ link, pending, callNumber, welcome, notice, noticeTone }: 
                  placeholder="+1 415 555 0123" required />
           <p class="hint">Include the country code. A linked number is permanent and can't be removed or changed.</p>
           <div class="actions">
-            <button class="btn" type="submit">Text me a code</button>
+            <button class="btn" type="submit">Call me with a code</button>
           </div>
         </form>`;
 }

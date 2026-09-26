@@ -439,7 +439,7 @@ async function skipPhone(request: Request, env: Env): Promise<Response> {
   });
 }
 
-/** One of the link form posts: text a code, check a code, or start over. */
+/** One of the link form posts: call with a code, check a code, or start over. */
 async function phoneAction(request: Request, env: Env, path: string): Promise<Response> {
   const session = await currentSession(request, env);
   if (!session) return redirect("/signin", request);
@@ -469,7 +469,7 @@ async function phoneAction(request: Request, env: Env, path: string): Promise<Re
   }
 
   const code = field("code");
-  if (!code) return problem("Enter the code from the text.");
+  if (!code) return problem("Enter the code from the call.");
   const result = await confirmLinkCode(env, session.sub, code);
   return result.ok ? seeOther("/phone?linked=1", request) : problem(result.message);
 }

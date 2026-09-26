@@ -1,7 +1,7 @@
 /**
  * Tests for linking a phone and recognising a call from it.
  *
- * A real code needs a real SMS and a real call needs a real carrier, so what is
+ * A real code needs a real outbound call and a real inbound call needs a real carrier, so what is
  * checked here is everything in between: which strings count as a number, how a
  * caller is read out of SIP headers, which webhooks are trusted, and what the
  * link screen offers at each step.
@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { calledNumber, incomingCall, verifyWebhook } from "../src/openai-webhook";
 import { formatPhone, normalizePhone, phoneFromSipHeader } from "../src/phone";
 import { renderPhonePage, type PhonePageOptions } from "../src/phone-page";
+import { codeTexml } from "../src/telnyx";
 
 let passed = 0;
 let failed = 0;
@@ -207,6 +208,13 @@ check("a notice is escaped rather than trusted", () => {
   const html = renderPhonePage({ ...base, notice: '<img src=x onerror="alert(1)">' });
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x/);
+});
+
+check("the code call reads each digit, twice", () => {
+  const texml = codeTexml("482915");
+  assert.match(texml, /^<\?xml version="1.0" encoding="UTF-8"\?><Response>/);
+  assert.equal(texml.match(/4, 8, 2, 9, 1, 5/g)?.length, 2);
+  assert.doesNotMatch(texml, /482915/);
 });
 
 await Promise.all(pending);

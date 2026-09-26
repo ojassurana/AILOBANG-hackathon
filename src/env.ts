@@ -17,7 +17,7 @@ export interface Env extends Cloudflare.Env {
    */
   TELEGRAM_API_ID: string;
   TELEGRAM_API_HASH: string;
-  /** Sends the SMS codes that link a phone number. */
+  /** Places the calls that read out phone-link codes. */
   TELNYX_API_KEY: string;
   /** The `whsec_` signing secret of the OpenAI webhook that announces phone calls. */
   OPENAI_WEBHOOK_SECRET: string;

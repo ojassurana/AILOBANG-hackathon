@@ -1,18 +1,19 @@
 /**
  * Linking a phone number to an account, and finding the account behind a call.
  *
- * A number is proven by a six-digit code texted from the site's Telnyx number.
+ * A number is proven by a six-digit code read out in a call from the site's
+ * Telnyx number.
  * Once linked it stays linked: a call from that number reaches the owner's
  * voice agent and, through it, their connected accounts, so the link is not
  * something to hand out or swap casually.
  */
 
 import type { Env } from "./env";
-import { sendSms } from "./telnyx";
+import { callWithCode } from "./telnyx";
 
-/** How long a texted code stays usable. */
+/** How long a code stays usable. */
 export const CODE_TTL_SECONDS = 10 * 60;
-/** The shortest gap between two texts to the same user. */
+/** The shortest gap between two code calls to the same user. */
 export const RESEND_AFTER_SECONDS = 30;
 const SEND_WINDOW_SECONDS = 60 * 60;
 const MAX_SENDS_PER_WINDOW = 5;
@@ -35,7 +36,7 @@ export type PhoneResult = { ok: true } | { ok: false; message: string };
  *
  * Spaces, dashes, dots and brackets are dropped, and a leading `00` is read as
  * the international prefix. A number with no country code is refused rather
- * than guessed at: guessing wrong texts a code to a stranger.
+ * than guessed at: guessing wrong phones a stranger with a code.
  */
 export function normalizePhone(input: string): string | null {
   let value = input.trim().replace(/[\s\-().]/g, "");
@@ -90,7 +91,7 @@ export async function pendingCode(db: D1Database, userId: string): Promise<Pendi
   return { phone: row.phone_number, expiresAt: row.expires_at };
 }
 
-/** Texts a fresh code to `input`, replacing any code the user was waiting on. */
+/** Calls `input` with a fresh code, replacing any code the user was waiting on. */
 export async function sendLinkCode(env: Env, userId: string, input: string): Promise<PhoneResult> {
   const phone = normalizePhone(input);
   if (!phone) {
@@ -126,15 +127,17 @@ export async function sendLinkCode(env: Env, userId: string, input: string): Pro
   }
 
   const code = generateCode();
-  const sent = await sendSms(
-    env.TELNYX_API_KEY,
-    env.TELNYX_PHONE_NUMBER,
-    phone,
-    `Your Ailobang code is ${code}. It expires in 10 minutes. Don't share it with anyone.`,
-  );
+  const sent = await callWithCode({
+    apiKey: env.TELNYX_API_KEY,
+    accountSid: env.TELNYX_ACCOUNT_SID,
+    applicationId: env.TELNYX_TEXML_APP_ID,
+    from: env.TELNYX_PHONE_NUMBER,
+    to: phone,
+    code,
+  });
   if (!sent.ok) {
-    console.error("phone: sms send failed", JSON.stringify({ detail: sent.detail }));
-    return { ok: false, message: "We couldn't text that number. Check it and try again." };
+    console.error("phone: code call failed", JSON.stringify({ detail: sent.detail }));
+    return { ok: false, message: "We couldn't call that number. Check it and try again." };
   }
 
   await env.DB.prepare(
@@ -202,7 +205,7 @@ export async function confirmLinkCode(env: Env, userId: string, input: string): 
     ]);
   } catch (error) {
     // Either unique key: this user linked in another tab, or someone else
-    // linked the number between the text and the code.
+    // linked the number between the call and the code.
     console.error("phone: link insert failed", error);
     if (await getPhoneLink(env.DB, userId)) return { ok: true };
     return { ok: false, message: "That number is already linked to another account." };
