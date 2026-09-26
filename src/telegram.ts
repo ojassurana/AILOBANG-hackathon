@@ -476,6 +476,21 @@ export class TelegramSession extends DurableObject<Env> {
       return this.status();
     }
 
+    // Telegram only honours a code hash for the session that asked for it. With
+    // no session on the row there is nothing left to check the code against, so
+    // every code would come back wrong; send them to step one, where a fresh
+    // code is one button away, rather than letting them type into a dead step.
+    if (!this.readLogin().session) {
+      this.writeLogin(
+        {
+          ...restartLogin(current),
+          error: "That code can't be checked any more. Enter your number for a new one.",
+        },
+        { session: null },
+      );
+      return this.status();
+    }
+
     try {
       const authorization = await this.withClient(async (client) => {
         const result = await client.invoke(
