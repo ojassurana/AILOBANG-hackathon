@@ -245,6 +245,14 @@ export class TelegramToolbox {
     if (!name) return `Give ${FIND_CONTACT} the name the caller said, as they said it.`;
 
     const people = await this.telegram.findContacts(name);
+    // Logged so a lookup can be checked from Workers Logs rather than trusted.
+    const candidates = people
+      .map((person) => `${person.title} | ${person.username ?? "no @username"} | ${person.source}`)
+      .join("; ");
+    console.log(
+      `${FIND_CONTACT} "${name}" -> ${people.length} candidate(s)` +
+        (candidates ? `: ${candidates}` : ""),
+    );
     if (!people.length) {
       return (
         `Nobody in the caller's Telegram matches "${name}". Say that plainly, and ask them to spell ` +
