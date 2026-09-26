@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ailobang</title>
+    <link rel="icon" href="/favicon.svg" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fbfbfd;
+        --fg: #16161a;
+        --muted: #6b6b76;
+        --accent: #16161a;
+        --accent-fg: #ffffff;
+        --border: rgba(0, 0, 0, 0.12);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0d0d10;
+          --fg: #f4f4f6;
+          --muted: #9a9aa5;
+          --accent: #f4f4f6;
+          --accent-fg: #16161a;
+          --border: rgba(255, 255, 255, 0.16);
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      main {
+        width: 100%;
+        max-width: 380px;
+        text-align: center;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 40px;
+        letter-spacing: -0.03em;
+      }
+      p {
+        margin: 0 0 32px;
+        color: var(--muted);
+      }
+      .btn {
+        display: block;
+        width: 100%;
+        padding: 12px 16px;
+        border: 0;
+        border-radius: 10px;
+        background: var(--accent);
+        color: var(--accent-fg);
+        font: inherit;
+        font-weight: 550;
+        text-decoration: none;
+        cursor: pointer;
+      }
+      .btn:hover {
+        opacity: 0.88;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Ailobang</h1>
+      <p>Welcome. Log in or create an account to continue.</p>
+      <a class="btn" href="/signin">Log in / Sign up</a>
+    </main>
+  </body>
+</html>
