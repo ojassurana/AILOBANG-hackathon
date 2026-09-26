@@ -92,7 +92,9 @@ export const TELEGRAM_TOOLS: ToolSchema[] = [
         "spelling out an @username. Use this every time the caller names a recipient — a first name, " +
         "a nickname, a full name — before calling telegram_prepare_send. It matches the chats already " +
         "read, then the caller's Telegram contacts, then Telegram search, and returns up to five " +
-        "people with their @usernames. One match can be sent to; several mean you must ask which.",
+        "people with their @usernames. One match can be sent to; several mean you must ask which. " +
+        "Someone with no @username is still a match: the message goes to their account, so never " +
+        "tell the caller a handle is needed.",
       parameters: {
         type: "object",
         properties: {
@@ -113,12 +115,17 @@ export const TELEGRAM_TOOLS: ToolSchema[] = [
         "Prepare a Telegram message for the caller to confirm. This does NOT send anything. Give the " +
         "exact text so it can be read back to them; nothing goes out until they say yes and you call " +
         "telegram_confirm_send. Name the recipient however the caller named them: a spoken name or an " +
-        "@username. A name that more than one person answers to is refused with the candidates, so " +
-        "never guess between them.",
+        "@username — a name is enough, and a contact with no @username is still someone the message " +
+        "reaches, so never ask the caller for a handle. A name that more than one person answers to " +
+        "is refused with the candidates, so never guess between them.",
       parameters: {
         type: "object",
         properties: {
-          to: { type: "string", description: "Who to send to: the name the caller said, or their @username." },
+          to: {
+            type: "string",
+            description:
+              "Who to send to: the name the caller said, or their @username. A name alone is enough.",
+          },
           text: { type: "string", description: "The exact message text, as it will be sent." },
         },
         required: ["to", "text"],
@@ -246,8 +253,15 @@ export class TelegramToolbox {
 
     const people = await this.telegram.findContacts(name);
     // Logged so a lookup can be checked from Workers Logs rather than trusted.
+    // The access hash is never logged: it is the one part of a match that must
+    // not leave the request, so all the log says about it is whether the send
+    // will have to fetch one.
     const candidates = people
-      .map((person) => `${person.title} | ${person.username ?? "no @username"} | ${person.source}`)
+      .map(
+        (person) =>
+          `${person.title} | ${person.username ?? "no @username"} | ${person.source} | ` +
+          `user:${person.userId ?? "unknown"}${person.accessHash ? "" : " (hash to fetch at send)"}`,
+      )
       .join("; ");
     console.log(
       `${FIND_CONTACT} "${name}" -> ${people.length} candidate(s)` +
@@ -255,8 +269,8 @@ export class TelegramToolbox {
     );
     if (!people.length) {
       return (
-        `Nobody in the caller's Telegram matches "${name}". Say that plainly, and ask them to spell ` +
-        `the @username if they know it.`
+        `Nobody in the caller's Telegram matches "${name}". Say that plainly, and ask them to check ` +
+        `the name they said — a handle is not needed to look someone up.`
       );
     }
 
@@ -269,8 +283,8 @@ export class TelegramToolbox {
         ? `One person matches "${name}": ${described(only)}.\n` +
             `Send to ${only.username}. Read the name back as you confirm, so the caller hears who it is going to.`
         : `One person matches "${name}": ${described(only)}.\n` +
-            `Tell the caller plainly that this person has no @username and cannot be messaged: ` +
-            `Telegram needs a handle to send to.`;
+            `Send to ${only.title} by name — an @username is not needed. Read the name back as you ` +
+            `confirm, so the caller hears who it is going to.`;
     }
 
     return [
@@ -293,7 +307,7 @@ export class TelegramToolbox {
     }
 
     return [
-      `Prepared, and NOT sent yet. To: ${prepared.title} (${prepared.to}).`,
+      `Prepared, and NOT sent yet. To: ${addressed(prepared.title ?? prepared.to ?? "them", prepared.to)}.`,
       `Message: "${prepared.text}"`,
       `Read that back to the caller and ask them to confirm. Call ${CONFIRM_SEND} only after they say yes.`,
     ].join("\n");
@@ -302,8 +316,13 @@ export class TelegramToolbox {
   private async confirmSend(): Promise<string> {
     const sent = await this.telegram.sendPending();
     if (!sent.ok) return sent.reason ?? "The message was not sent.";
-    return `Sent to ${sent.title} (${sent.to}).`;
+    return `Sent to ${addressed(sent.title ?? sent.to ?? "them", sent.to)}.`;
   }
+}
+
+/** Names a recipient once: with the handle when there is one to say, without when not. */
+function addressed(title: string, to: string | null): string {
+  return to && to !== title ? `${title} (${to})` : title;
 }
 
 function parseArguments(raw: string): Record<string, unknown> {

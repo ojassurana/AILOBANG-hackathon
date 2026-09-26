@@ -432,7 +432,11 @@ export function checkSendCaps(input: {
 export const PENDING_SEND_TTL_MS = 120 * 1000;
 
 export interface PendingSend {
-  /** The peer as the model named it, for looking the entity up again. */
+  /**
+   * The address the message goes to: the @handle when the account has one, or
+   * `id:<userId>` when it does not. Never an access hash — a send resolves that
+   * for itself, because a stored one addresses whoever it points at now.
+   */
   to: string;
   /** The resolved display name, for reading the message back. */
   toLabel: string;

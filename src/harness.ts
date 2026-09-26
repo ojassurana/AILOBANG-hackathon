@@ -73,10 +73,11 @@ The caller never has to spell out a handle. When they name a person — a first
 name, a nickname, a full name — call telegram_find_contact with the name as they
 said it and use what it returns. One match is that person. Several means the name
 is not enough on its own, so ask which they mean rather than choosing. A match
-with no @username cannot be messaged at all, and saying so is the answer. The
-handle telegram_prepare_send reports is the one the message will go to, so read
-it out along with the text. Never tell the caller a name was not found without
-having looked it up.
+with no @username is still someone to send to: the message goes to their account,
+and a name is enough to reach them, so never tell the caller a handle is needed.
+When telegram_prepare_send reports an @username it is the one the message goes
+to, so read it out along with the text; when it reports none, name the person
+anyway. Never tell the caller a name was not found without having looked it up.
 
 ## Web search
 web_search looks things up on the live internet. Use it for anything about the

@@ -21,14 +21,20 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { Api, TelegramClient, errors } from "teleproto";
+import { Api, TelegramClient, errors, utils } from "teleproto";
 import { StringSession } from "teleproto/sessions";
 import type { Env } from "./env";
 import {
   type ContactCandidate,
   type NamedPerson,
+  addressUserId,
+  freshIdentity,
   rankMatches,
   resolveSpokenName,
+  sendAddress,
+  sendKey,
+  spokenAddress,
+  storedPeople,
 } from "./telegram-contacts";
 import {
   type PendingSend,
@@ -100,7 +106,10 @@ export interface MessageLine {
 }
 
 export interface Recipient {
-  username: string;
+  /** The @handle to send to, or null when the account has none and the id is used. */
+  username: string | null;
+  /** The account's Telegram id, which is what a username-less send is addressed by. */
+  userId: string | null;
   title: string;
   /** Whether we have never sent to this person, which is the risky case. */
   cold: boolean;
@@ -110,6 +119,7 @@ export interface PrepareResult {
   /** False when the send was refused, with `reason` saying why. */
   ok: boolean;
   reason: string | null;
+  /** The @handle it will go to, or null when the account has no handle to name. */
   to: string | null;
   title: string | null;
   /** Exactly the text to read back for confirmation. */
@@ -119,6 +129,7 @@ export interface PrepareResult {
 export interface SendResult {
   ok: boolean;
   reason: string | null;
+  /** The @handle it went to, or null when the account has no handle to name. */
   to: string | null;
   title: string | null;
 }
@@ -960,7 +971,9 @@ export class TelegramSession extends DurableObject<Env> {
    * caller, so they come first; the account's own address book is next, and
    * Telegram's own search is the last resort for someone never spoken to. Only
    * matches for the name asked about are returned — the address book itself is
-   * fetched, used and dropped, never stored.
+   * fetched, used and dropped, never stored. Each match carries the id and access
+   * hash it came with, which is what lets a contact with no @username be sent
+   * to; the hash is not written anywhere on the way.
    *
    * Nothing comes back on an unconnected account. An empty list and "not
    * connected" are different answers, so every caller refuses on the connection
@@ -987,23 +1000,22 @@ export class TelegramSession extends DurableObject<Env> {
 
   /**
    * The names in the messages table, which is the one source that needs no
-   * socket. `chat_title` is the @username when there is one and the person's
-   * display name when there is not, so a title that is not a handle yields no
-   * handle: the table simply does not know one.
+   * socket. Only the rows are read here; reading them is the module's business,
+   * and the chat key is where the id comes from — there is no hash in this table
+   * to recover in the first place.
    */
   private storedPeople(): NamedPerson[] {
-    return this.ctx.storage.sql
-      .exec<{ chat_title: string }>(
-        `SELECT chat_title, MAX(sent_at) AS last FROM messages
+    const rows = this.ctx.storage.sql
+      .exec<{ chat: string; chat_title: string }>(
+        `SELECT chat, chat_title, MAX(sent_at) AS last FROM messages
          WHERE chat_title IS NOT NULL
          GROUP BY chat
          ORDER BY last DESC`,
       )
       .toArray()
-      .map((row) => ({
-        title: row.chat_title,
-        username: row.chat_title.startsWith("@") ? row.chat_title : null,
-      }));
+      .map((row) => ({ chat: row.chat, title: row.chat_title }));
+
+    return storedPeople(rows);
   }
 
   /**
@@ -1029,19 +1041,21 @@ export class TelegramSession extends DurableObject<Env> {
     const settled = resolveSpokenName(typed, people);
     if (settled.kind === "refuse") return { reason: settled.reason };
 
+    const target = settled.target;
     return {
       recipient: {
-        username: settled.username,
-        title: settled.title,
-        cold: !this.hasSentTo(settled.username.replace(/^@/, "")),
+        username: target.username,
+        userId: target.userId,
+        title: target.title,
+        cold: !this.hasSentTo(sendKey(sendAddress(target))),
       },
     };
   }
 
   /**
-   * Looks a person up by handle. Usernames only, which is the whole of this
-   * version's addressing: we never build a peer from a stored id, so a stale
-   * access hash cannot be sent to by mistake.
+   * Looks a person up by handle. A handle is all the peer itself needs, so there
+   * is no id to build here; the id that comes back with it is carried along
+   * because the send tables key everyone the same way.
    */
   async findRecipient(username: string): Promise<Recipient | null> {
     const handle = username.replace(/^@/, "").trim();
@@ -1056,18 +1070,20 @@ export class TelegramSession extends DurableObject<Env> {
         | undefined;
       if (!user) return null;
 
-      const cold = !this.hasSentTo(handle);
+      const cold = !this.hasSentTo(sendKey(handle));
       return {
         username: user.username ? `@${user.username}` : `@${handle}`,
+        userId: String(user.id),
         title: displayName(user) || (user.username ? `@${user.username}` : handle),
         cold,
       };
     });
   }
 
-  private hasSentTo(username: string): boolean {
+  /** Whether the send tables already know this key, which is what coldness means. */
+  private hasSentTo(key: string): boolean {
     const rows = this.ctx.storage.sql
-      .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM recipients WHERE username = ?`, username)
+      .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM recipients WHERE username = ?`, key)
       .toArray();
     return (rows[0]?.n ?? 0) > 0;
   }
@@ -1079,6 +1095,11 @@ export class TelegramSession extends DurableObject<Env> {
    * can only see the conversation, so it cannot quote an identifier back to us.
    * The single stored draft with a short life is what makes "send it" mean the
    * message just read back, and nothing staler.
+   *
+   * What the draft keeps about the recipient is the address and nothing more:
+   * a handle when there is one, otherwise the user id to find them by again.
+   * The access hash that came with the lookup is not written anywhere — it is
+   * what expires, and the send fetches its own.
    */
   async prepareSend(to: string, text: string): Promise<PrepareResult> {
     const body = text.trim();
@@ -1095,7 +1116,7 @@ export class TelegramSession extends DurableObject<Env> {
     }
     const recipient = settled.recipient;
 
-    const verdict = this.capVerdict(recipient.username);
+    const verdict = this.capVerdict(sendKey(sendAddress(recipient)));
     if (!verdict.allowed) {
       return { ok: false, reason: verdict.reason, to: recipient.username, title: recipient.title, text: null };
     }
@@ -1103,7 +1124,7 @@ export class TelegramSession extends DurableObject<Env> {
     this.ctx.storage.sql.exec(`DELETE FROM pending_send`);
     this.ctx.storage.sql.exec(
       `INSERT INTO pending_send (id, to_text, to_label, text, prepared_at) VALUES (1, ?, ?, ?, ?)`,
-      recipient.username,
+      sendAddress(recipient),
       recipient.title,
       body,
       Date.now(),
@@ -1126,6 +1147,11 @@ export class TelegramSession extends DurableObject<Env> {
    * Sends whatever was last prepared. Takes no argument: the model's "yes" is a
    * second run that cannot carry an id it was never told, so the pending draft
    * is the only thing this can mean.
+   *
+   * A handle addresses the peer on its own. A user id does not: it needs an
+   * access hash, and this is where that hash is obtained — by looking the id up
+   * again, in the same call as the send itself. Nothing in storage holds a hash,
+   * so there is none to go stale.
    */
   async sendPending(): Promise<SendResult> {
     const blocked = this.notConnectedReason();
@@ -1142,17 +1168,37 @@ export class TelegramSession extends DurableObject<Env> {
       };
     }
 
-    const verdict = this.capVerdict(pending!.to);
+    const verdict = this.capVerdict(sendKey(pending!.to));
     if (!verdict.allowed) {
-      return { ok: false, reason: verdict.reason, to: pending!.to, title: pending!.toLabel };
+      return { ok: false, reason: verdict.reason, to: spokenAddress(pending!.to), title: pending!.toLabel };
     }
 
+    const userId = addressUserId(pending!.to);
     try {
-      const sent = await this.withClient((client) =>
-        client.sendMessage(pending!.to, { message: pending!.text }),
-      );
+      const sent = await this.withClient(async (client) => {
+        if (userId === null) return client.sendMessage(pending!.to, { message: pending!.text });
+
+        // The id is all the draft kept, so the peer is built from the hash this
+        // call fetches. A stored hash would address whoever it points at now,
+        // which is why a failed lookup sends nothing instead.
+        const peer = await this.peerForUserId(client, userId, pending!.toLabel);
+        return peer ? client.sendMessage(peer, { message: pending!.text }) : null;
+      });
+
+      if (!sent) {
+        return {
+          ok: false,
+          reason:
+            `Telegram isn't giving me ${pending!.toLabel} to send to, so nothing was sent. Say that ` +
+            `plainly: retrying the same name will not change it, and only an @username the caller ` +
+            `knows would reach them.`,
+          to: null,
+          title: pending!.toLabel,
+        };
+      }
+
       this.recordSend(pending!);
-      if (sent && sent.className === "Message") {
+      if (sent.className === "Message") {
         const line = this.storable(sent as Api.Message, new Map());
         if (line) {
           this.ctx.storage.sql.exec(
@@ -1172,22 +1218,62 @@ export class TelegramSession extends DurableObject<Env> {
     } catch (error) {
       this.recordLoginError(error);
       const classified = classifyTelegramError(error, telegramErrorShape(error));
-      return { ok: false, reason: classified.message, to: pending!.to, title: pending!.toLabel };
+      return { ok: false, reason: classified.message, to: spokenAddress(pending!.to), title: pending!.toLabel };
     }
 
     this.ctx.storage.sql.exec(`DELETE FROM pending_send`);
-    return { ok: true, reason: null, to: pending!.to, title: pending!.toLabel };
+    return { ok: true, reason: null, to: spokenAddress(pending!.to), title: pending!.toLabel };
+  }
+
+  /**
+   * The peer for a user id, built from an access hash this call just fetched.
+   *
+   * Contacts first, then Telegram search — the same lookups a spoken name goes
+   * through, both of which carry the hash a peer needs, and both matched on the
+   * id rather than on the name. A name nobody can be searched for exactly (the
+   * caller's own label for a contact, say) is tried again on its first word;
+   * widening the query cannot reach the wrong person, because every result is
+   * still accepted only if its id is the one the draft kept.
+   *
+   * Null when none of that knows the id, which sends nothing rather than
+   * reaching for a hash from an earlier request.
+   */
+  private async peerForUserId(
+    client: TelegramClient,
+    userId: string,
+    name: string,
+  ): Promise<Api.InputPeerUser | null> {
+    let identity = freshIdentity(userId, peopleFrom(await client.getContacts()));
+
+    for (const query of searchTerms(name)) {
+      if (identity) break;
+      const found = await client.invoke(
+        new Api.contacts.Search({ q: query, limit: CONTACT_SEARCH_LIMIT }),
+      );
+      identity = freshIdentity(userId, peopleFrom(found.users));
+    }
+    if (!identity) return null;
+
+    // `Api.InputPeerUser` wants 64-bit values where every other id in this file
+    // travels as a decimal string, and teleproto's own parser is the one way to
+    // get them without a second big-integer dependency.
+    const id = utils.parseID(identity.userId);
+    const accessHash = utils.parseID(identity.accessHash);
+    if (!id || !accessHash) return null;
+
+    return new Api.InputPeerUser({ userId: id, accessHash });
   }
 
   /** Marks the recipient known and logs the send, so the caps can see it. */
   private recordSend(pending: PendingSend): void {
-    const handle = pending.to.replace(/^@/, "");
+    const key = sendKey(pending.to);
+    const userId = addressUserId(pending.to);
     const now = Date.now();
-    const cold = this.hasSentTo(handle) ? 0 : 1;
+    const cold = this.hasSentTo(key) ? 0 : 1;
     this.ctx.storage.sql.exec(
       `INSERT INTO recipients (username, title, first_sent_at) VALUES (?, ?, ?)
        ON CONFLICT(username) DO NOTHING`,
-      handle,
+      key,
       pending.toLabel,
       now,
     );
@@ -1195,12 +1281,11 @@ export class TelegramSession extends DurableObject<Env> {
       `INSERT INTO send_log (at, cold, chat) VALUES (?, ?, ?)`,
       now,
       cold,
-      `user:${handle}`,
+      `user:${userId ?? pending.to.replace(/^@/, "")}`,
     );
   }
 
-  private capVerdict(username: string): { allowed: boolean; reason: string | null } {
-    const handle = username.replace(/^@/, "");
+  private capVerdict(key: string): { allowed: boolean; reason: string | null } {
     const sentAt = this.ctx.storage.sql
       .exec<{ at: number }>(`SELECT at FROM send_log ORDER BY at ASC`)
       .toArray()
@@ -1213,7 +1298,7 @@ export class TelegramSession extends DurableObject<Env> {
     return checkSendCaps({
       sentAt,
       coldSentAt,
-      isCold: !this.hasSentTo(handle),
+      isCold: !this.hasSentTo(key),
       now: Date.now(),
     });
   }
@@ -1226,12 +1311,38 @@ function displayName(user: Api.User): string {
 }
 
 /**
+ * The queries to search Telegram with for a stored name, in order.
+ *
+ * The whole name first, then its first word: a label the caller's own address
+ * book gave someone may not be what Telegram's name index holds, and the first
+ * word is the likeliest thing it does. Results are matched on the id, so the
+ * wider second query cannot reach anyone else.
+ */
+function searchTerms(name: string): string[] {
+  const trimmed = name.trim();
+  if (!trimmed) return [];
+  const [first] = trimmed.split(/\s+/);
+  return first && first !== trimmed ? [trimmed, first] : [trimmed];
+}
+
+/**
+ * A 64-bit value as the decimal string the rest of this file passes around, or
+ * null when there is nothing usable. Telegram answers with 0 for a hash it will
+ * not let us address, and 0 is not an access hash.
+ */
+function longValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  return text === "" || text === "0" ? null : text;
+}
+
+/**
  * The matchable part of a list of Telegram users.
  *
  * A deleted account and an empty slot name nobody, so they are dropped rather
- * than offered as a candidate. A user with no @username is kept: they are a
- * real answer to the name asked about, and the screen has to be able to say
- * that they cannot be messaged instead of leaving the caller wondering.
+ * than offered as a candidate. A user with no @username is kept, together with
+ * the id and access hash the same response carried: they are a real answer to
+ * the name asked about, and a message reaches their account without a handle.
  */
 function peopleFrom(users: Api.TypeUser[]): NamedPerson[] {
   return users
@@ -1240,6 +1351,8 @@ function peopleFrom(users: Api.TypeUser[]): NamedPerson[] {
     .map((user) => ({
       title: displayName(user) || (user.username ? `@${user.username}` : ""),
       username: user.username ? `@${user.username}` : null,
+      userId: String(user.id),
+      accessHash: longValue(user.accessHash),
     }))
     .filter((person) => person.title);
 }
