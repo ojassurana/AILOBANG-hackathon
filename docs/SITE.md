@@ -117,8 +117,9 @@ A dashed "More connectors coming soon" card sits under the table.
 
 **Auth configs.** Composio requires an `auth_config_id` per toolkit. All of them are
 Composio-managed OAuth2 configs (`is_composio_managed: true`), so the project needs no OAuth
-apps of its own. They live in the **`AiLobang`** project — the project the `COMPOSIO_API_KEY`
-belongs to — and were created by POSTing to `/api/v3.1/auth_configs`:
+apps of its own. The four Google rows share one `googlesuper` config; the rest have their own.
+They live in the **`AiLobang`** project — the project the `COMPOSIO_API_KEY` belongs to — and
+were created by POSTing to `/api/v3.1/auth_configs`:
 
 ```json
 { "toolkit": { "slug": "gmail" }, "auth_config": { "type": "use_composio_managed_auth" } }
@@ -126,6 +127,16 @@ belongs to — and were created by POSTing to `/api/v3.1/auth_configs`:
 
 The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
 `googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
+
+**One Google login.** The four Google rows (Drive, Gmail, Sheets, Docs) do not hold their own
+connections — they all read a single `googlesuper` connection, so one Google consent covers all of
+them. `src/connectors.ts` expresses this as `slug` vs `toolkit`: the `slug` is the row's name and
+URL segment, the `toolkit` is where the Composio connection actually lives (everything except the
+Google rows has the two equal). Connecting any Google row lights all four; disconnecting one
+disconnects all four, and the confirm prompt names the others. The consent Google shows is broad
+(Drive, Gmail, Docs, Sheets, Calendar, Ads, Analytics, Tasks and Photos scopes) — that breadth is
+the price of a single login. Google Maps stays separate, since it is a Cloud API-key service rather
+than part of the Google account consent.
 
 **Account labels.** Composio returns no profile for some toolkits — Google's return only tokens
 and scopes — and Composio's own `word_id` (e.g. `googledrive_weekly-emily`) means nothing to a

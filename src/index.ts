@@ -10,6 +10,7 @@
 import {
   CONNECTORS,
   connectorBySlug,
+  connectorsForToolkit,
   logoUrl,
   type Connector,
 } from "./connectors";
@@ -388,7 +389,7 @@ async function disconnectToolkit(request: Request, env: Env, slug: string): Prom
   try {
     // A toolkit can hold more than one connection; disconnecting the app means
     // clearing all of them.
-    const accountIds = await listAccountIds(env.COMPOSIO_API_KEY, session.sub, connector.slug);
+    const accountIds = await listAccountIds(env.COMPOSIO_API_KEY, session.sub, connector.toolkit);
     for (const accountId of accountIds) {
       await deleteConnectedAccount(env.COMPOSIO_API_KEY, accountId);
     }
@@ -448,7 +449,7 @@ function renderConnectionsPage(
     warning: string | null;
   },
 ): string {
-  const connected = CONNECTORS.filter((c) => accounts.get(c.slug)?.status === "ACTIVE").length;
+  const connected = CONNECTORS.filter((c) => accounts.get(c.toolkit)?.status === "ACTIVE").length;
 
   let banner = "";
   if (flash.denied) {
@@ -456,7 +457,7 @@ function renderConnectionsPage(
   } else if (flash.justConnected) {
     const connector = connectorBySlug(flash.justConnected);
     const name = connector?.name ?? "That account";
-    const status = connector ? accounts.get(connector.slug)?.status : undefined;
+    const status = connector ? accounts.get(connector.toolkit)?.status : undefined;
 
     // The return URL only means the user came back, not that consent succeeded,
     // so report what Composio actually reports.
@@ -478,7 +479,7 @@ function renderConnectionsPage(
   }
 
   const rows = CONNECTORS.map((connector) =>
-    connectorRow(connector, accounts.get(connector.slug)),
+    connectorRow(connector, accounts.get(connector.toolkit)),
   ).join("\n");
 
   return `<!doctype html>
@@ -627,6 +628,17 @@ ${rows}
 function connectorRow(connector: Connector, account: ConnectedAccount | undefined): string {
   const status = account?.status ?? null;
 
+  // The Google rows share a single googlesuper connection, so connecting one
+  // grants the others and disconnecting one takes them with it.
+  const sharedRows = connectorsForToolkit(connector.toolkit).filter(
+    (other) => other.slug !== connector.slug,
+  );
+  const confirmText = (
+    sharedRows.length
+      ? `Disconnect ${connector.name}? This also disconnects ${sharedRows.map((other) => other.name).join(", ")}.`
+      : `Disconnect ${connector.name}?`
+  ).replace(/'/g, "\\'");
+
   let state: string;
   if (status === "ACTIVE") {
     state = `<span class="pill"><span class="dot ok"></span>Connected</span>${
@@ -637,14 +649,16 @@ function connectorRow(connector: Connector, account: ConnectedAccount | undefine
   } else if (status === "FAILED") {
     state = `<span class="pill"><span class="dot bad"></span>Failed</span>`;
   } else {
-    state = `<span class="muted">Not connected</span>`;
+    state = `<span class="muted">Not connected</span>${
+      sharedRows.length ? `<span class="acct">Shares one Google login</span>` : ""
+    }`;
   }
 
   const action =
     status === "ACTIVE"
       ? `<a class="btn ghost" href="/connect/${connector.slug}">Reconnect</a>
               <form class="inline" method="post" action="/disconnect/${connector.slug}"
-                    onsubmit="return confirm('Disconnect ${escapeHtml(connector.name)}?')">
+                    onsubmit="return confirm('${confirmText}')">
                 <button class="link" type="submit">Disconnect</button>
               </form>`
       : `<a class="btn" href="/connect/${connector.slug}">Connect<span class="sm-hide"> now</span></a>`;
