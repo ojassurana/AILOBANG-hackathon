@@ -27,21 +27,17 @@ import {
   resolveAccountIdentity,
   type ConnectedAccount,
 } from "./composio";
+import { renderCallPage } from "./call-page";
+import type { Env } from "./env";
+import { routeAgentRequest } from "agents";
+
+export { VoiceAgent } from "./voice-agent";
 
 const WORKOS_API = "https://api.workos.com";
 const SESSION_COOKIE = "alb_session";
 const PKCE_COOKIE = "alb_pkce";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const PKCE_TTL_SECONDS = 60 * 10;
-
-interface Env {
-  ASSETS: Fetcher;
-  DB: D1Database;
-  WORKOS_CLIENT_ID: string;
-  WORKOS_REDIRECT_URI: string;
-  SESSION_SECRET: string;
-  COMPOSIO_API_KEY: string;
-}
 
 interface WorkOSUser {
   id: string;
@@ -82,6 +78,15 @@ async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
+  // The voice agent's WebSocket. Its instance name is the user id, so the
+  // session cookie decides who may reach which agent.
+  if (path.startsWith("/agents/")) {
+    const session = await currentSession(request, env);
+    if (!session) return new Response("Unauthorized", { status: 401 });
+    if (path.split("/")[3] !== session.sub) return new Response("Forbidden", { status: 403 });
+    return (await routeAgentRequest(request, env)) ?? new Response("Not found", { status: 404 });
+  }
+
   // Disconnecting is a mutation, so it only accepts POST from the table's form.
   if (path.startsWith("/disconnect/")) {
     if (request.method !== "POST") return methodNotAllowed("POST");
@@ -113,6 +118,8 @@ async function route(request: Request, env: Env): Promise<Response> {
       return finishLogin(request, env);
     case "/app":
       return appPage(request, env);
+    case "/call":
+      return callPage(request, env);
     case "/auth/logout":
       return logout(request, env);
     case "/favicon.svg":
@@ -280,6 +287,16 @@ async function appPage(request: Request, env: Env): Promise<Response> {
     denied,
     warning,
   });  return new Response(html, {
+    headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/** The call page: a microphone, a live transcript, and the voice agent behind it. */
+async function callPage(request: Request, env: Env): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  return new Response(renderCallPage({ email: session.email, userId: session.sub }), {
     headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
   });
 }
@@ -630,6 +647,42 @@ function renderConnectionsPage(
         color: var(--muted);
         font-size: 14px;
       }
+      .call {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-top: 24px;
+        padding: 18px;
+        border-radius: 16px;
+        background: var(--accent);
+        color: var(--accent-fg);
+        text-decoration: none;
+        box-shadow: var(--shadow);
+      }
+      .call:hover { opacity: 0.92; }
+      .callicon {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 42px;
+        height: 42px;
+        border-radius: 50%;
+        background: rgba(127, 127, 127, 0.22);
+      }
+      .callicon svg { width: 20px; height: 20px; }
+      .calltext { flex: 1 1 auto; min-width: 0; }
+      .calltitle { display: block; font-weight: 600; font-size: 15.5px; }
+      .callsub { display: block; font-size: 13px; opacity: 0.75; }
+      .callgo {
+        flex: none;
+        padding: 8px 14px;
+        border: 1px solid currentColor;
+        border-radius: 9px;
+        font-size: 13.5px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
       .grp > summary {
         display: flex;
         align-items: center;
@@ -680,6 +733,9 @@ function renderConnectionsPage(
         .sm-hide { display: none; }
         /* The expanded box lists every service, so the summary strip is noise. */
         .gright .strip { display: none; }
+        /* The call card wraps instead of squeezing its label. */
+        .call { flex-wrap: wrap; }
+        .callgo { width: 100%; text-align: center; }
       }
     </style>
   </head>
@@ -722,6 +778,21 @@ ${rows}
         </table>
       </div>
       <p class="soon">More connectors coming soon</p>
+      <a class="call" href="/call">
+        <span class="callicon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z" />
+            <path d="M19 11a7 7 0 0 1-14 0" />
+            <path d="M12 18v3" />
+          </svg>
+        </span>
+        <span class="calltext">
+          <span class="calltitle">Call your accounts</span>
+          <span class="callsub">Start a call and just ask. We'll look it up for you.</span>
+        </span>
+        <span class="callgo">Start call</span>
+      </a>
     </div>
   </body>
 </html>`;

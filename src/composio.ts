@@ -4,6 +4,8 @@
  * Connections are scoped to a `user_id`, which we set to the WorkOS user id so
  * every customer sees only their own connected accounts.
  */
+import { CONNECTORS, toolkitAuthConfigs } from "./connectors";
+
 const COMPOSIO_API = "https://backend.composio.dev/api/v3.1";
 
 /** Account states Composio reports. We only surface the ones users can act on. */
@@ -271,4 +273,47 @@ export async function resolveAccountIdentity(
   });
 
   return pickIdentity(data?.data);
+}
+
+/* ------------------------------------------------ tool router sessions */
+
+export interface ToolRouterSession {
+  sessionId: string;
+  mcpUrl: string;
+}
+
+/**
+ * Opens a Composio "tool router" session for one user and returns the MCP URL
+ * bound to it: every tool reached through that URL acts only on this user's
+ * connected accounts.
+ *
+ * Sessions do not expire, and leaving `connected_accounts` unpinned means an
+ * account connected later is picked up without recreating the session.
+ */
+export async function createToolRouterSession(
+  apiKey: string,
+  userId: string,
+  callbackUrl: string,
+): Promise<ToolRouterSession> {
+  const data = await composioFetch<{ session_id?: string; mcp?: { url?: string } }>(
+    apiKey,
+    "/tool_router/session",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        user_id: userId,
+        toolkits: { enable: [...new Set(CONNECTORS.map((connector) => connector.toolkit))] },
+        auth_configs: toolkitAuthConfigs(),
+        manage_connections: { enable: true, callback_url: callbackUrl },
+        experimental: { fast_mode: true },
+        mcp: true,
+      }),
+    },
+  );
+
+  if (!data.session_id || !data.mcp?.url) {
+    throw new Error("composio session response had no session id or MCP url");
+  }
+
+  return { sessionId: data.session_id, mcpUrl: data.mcp.url };
 }

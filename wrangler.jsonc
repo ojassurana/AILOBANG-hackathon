@@ -3,6 +3,7 @@
   "name": "ailobang",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -14,6 +15,20 @@
       "binding": "DB",
       "database_name": "ailobang-users",
       "database_id": "6c540dce-93de-460c-852d-e1b306255fcd"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "VOICE_AGENT",
+        "class_name": "VoiceAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["VoiceAgent"]
     }
   ],
   "vars": {

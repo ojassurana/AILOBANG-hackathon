@@ -14,13 +14,14 @@ Live at **https://ailobang.com**
 | `GET /auth/login` | Starts the AuthKit flow: sets a PKCE cookie and redirects to WorkOS |
 | `GET /callback` | Exchanges the WorkOS code, upserts the user in D1, sets the session cookie |
 | `GET /app` | The post-login **Connect your accounts** page; redirects to `/signin` when signed out |
+| `GET /call` | The call page (a microphone, live transcript, and the voice agent behind them) |
+| `GET /agents/voice-agent/<user id>` | The voice agent's WebSocket; the session cookie decides which agent a caller may reach |
 | `GET /connect/<toolkit>` | Creates a Composio Connect Link for that toolkit and redirects to it |
-| `POST /disconnect/<toolkit>` | Disconnects that toolkit: deletes the user's Composio connection(s) for it |
-
-`<toolkit>` is a connector's `slug`, or `google` for the shared Google group.
 | `GET /connect/return/<toolkit>` | Composio's callback; returns the browser to `/app?connected=<toolkit>` |
 | `POST /disconnect/<toolkit>` | Disconnects that toolkit: deletes the user's Composio connection(s) for it |
 | `GET /auth/logout` | Ends the WorkOS session and clears the local cookie |
+
+`<toolkit>` is a connector's `slug`, or `google` for the shared Google group.
 
 ## How authentication works
 
@@ -55,9 +56,10 @@ Secrets (set with `npx wrangler secret put <NAME>`):
 - `SESSION_SECRET` — 32-byte random string used to sign session cookies
 - `COMPOSIO_API_KEY` — project API key from the Composio dashboard, used for Connect Links and
   reading connected accounts
+- `OPENAI_API_KEY` — OpenAI project key, used for the GPT-Live voice session
+- `DEEPSEEK_API_KEY` — DeepSeek key, used by the call harness to choose and run tools
 
-For local development, create `.dev.vars` with `SESSION_SECRET=<value>` and
-`COMPOSIO_API_KEY=<value>`.
+For local development, create `.dev.vars` with those five names set.
 
 ## WorkOS environment
 
@@ -116,7 +118,53 @@ trigger it by prefetching — behind a `confirm()` prompt. It deletes every conn
 holds for that toolkit (`DELETE /connected_accounts/{id}`), since one toolkit can hold several,
 then returns to the table with a confirmation. `GET` on that path returns 405.
 
-A dashed "More connectors coming soon" card sits under the table.
+A dashed "More connectors coming soon" card sits under the table, followed by a **Call your
+accounts** card that links to `/call`.
+
+## Calling your accounts (GPT-Live + a backend harness)
+
+Under the table, a **Call your accounts** card opens `/call`. Pressing the microphone starts a
+call; the page captures mono PCM16 at 24 kHz, streams it to the agent as binary WebSocket
+frames, and plays the same format back.
+
+Three pieces do the work:
+
+- **GPT-Live** (`gpt-live-1`) owns the spoken conversation. It can listen and speak at the same
+  time and decides when a request needs the backend, but it does no reasoning or tool use.
+- **The voice agent** (`src/voice-agent.ts`) is one Durable Object per user, built on Cloudflare's
+  Agents SDK. It bridges the browser's socket to the Live session over
+  `wss://api.openai.com/v1/live/sessions`, and runs the harness when GPT-Live asks.
+- **The harness** (`src/harness.ts`) is the backend. It reconstructs what the caller wants from
+  the running transcript, then works it out with DeepSeek and the Composio MCP tools for that
+  user's connected accounts, and hands back one short result to be spoken.
+
+**Client delegation.** The Live session is started with `delegation: { type: "client" }`, so
+GPT-Live asks the Worker rather than calling a model of its own. The request arrives as
+`session.delegation.created` — and it carries **no task text**, only an id — so the agent waits a
+beat for the transcript to catch up and sends that. Progress goes out as
+`session.thinking.append` ("Fetching that now.") and the answer as `session.commentary.append`,
+which the model paraphrases aloud. Both carry the delegation id; the model then keeps talking
+while the harness works.
+
+**Tool access is per user.** The harness reaches Composio through a *tool router session*
+(`POST /api/v3.1/tool_router/session`) created once per user and cached in the Durable Object's
+storage. That session's MCP URL is bound to the user's Composio `user_id`, so its tools can only
+touch that caller's connected accounts. The MCP client (`src/mcp.ts`) speaks streamable HTTP and
+reads the SSE-framed JSON-RPC replies; the session exposes Composio's meta-tools, so each request
+is search → schema → execute.
+
+Notes worth keeping in mind:
+
+- Audio only flows one way through the model when the caller's microphone stream is flowing. The
+  page streams silence from the moment the call connects, including while the caller is quiet;
+  without that, appended context is never acknowledged.
+- GPT-Live handles interruption itself and has no "stop speaking" or output-audio-done event, so
+  the page drops its own playback queue after ~200 ms of sustained caller speech.
+- The Live session's model, voice, audio format and delegation mode are fixed at startup, and a
+  session lives for about two hours.
+- The agent's WebSocket is gated on the session cookie *and* on the instance name matching the
+  signed-in user, so one caller cannot reach another's agent.
+
 
 **Auth configs.** Composio requires an `auth_config_id` per toolkit. All of them are
 Composio-managed OAuth2 configs (`is_composio_managed: true`), so the project needs no OAuth

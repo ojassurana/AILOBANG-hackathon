@@ -184,6 +184,13 @@ export function connectorsForToolkit(toolkit: string): Connector[] {
   return CONNECTORS.filter((c) => c.toolkit === toolkit);
 }
 
+/** The toolkit each connection lives under, paired with the auth config to use for it. */
+export function toolkitAuthConfigs(): Record<string, string> {
+  const configs: Record<string, string> = {};
+  for (const connector of CONNECTORS) configs[connector.toolkit] = connector.authConfigId;
+  return configs;
+}
+
 export function logoUrl(slug: string): string {
   return `https://logos.composio.dev/api/${slug}`;
 }

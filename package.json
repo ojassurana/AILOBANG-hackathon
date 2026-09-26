@@ -13,5 +13,8 @@
   },
   "devDependencies": {
     "wrangler": "^4.135.0"
+  },
+  "dependencies": {
+    "agents": "^0.24.0"
   }
 }
