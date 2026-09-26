@@ -8,6 +8,8 @@
  * and the renderer never has to know which source it is looking at.
  */
 
+import type { TelegramPhase } from "./telegram-session";
+
 export type RowTone = "ok" | "wait" | "bad";
 
 export interface ConnectorRowState {
@@ -19,9 +21,10 @@ export interface ConnectorRowState {
   accountLabel?: string | null;
   /**
    * Which control the row offers. "resume" is for a connection that is partway
-   * through and would be picked up rather than started again.
+   * through and would be picked up rather than started again; "none" is for a
+   * connection that is finished, where the only useful control is Disconnect.
    */
-  actionKind: "connect" | "reconnect" | "resume";
+  actionKind: "connect" | "reconnect" | "resume" | "none";
   actionLabel: string;
   /** Whether the row also offers Disconnect. */
   canDisconnect: boolean;
@@ -64,6 +67,82 @@ export function composioRowState(
         label: "Failed",
         actionKind: "connect",
         actionLabel: "Connect",
+        canDisconnect: false,
+      };
+    default:
+      return {
+        tone: null,
+        label: "Not connected",
+        actionKind: "connect",
+        actionLabel: "Connect",
+        canDisconnect: false,
+      };
+  }
+}
+
+/**
+ * Just the parts of a login the row reads.
+ *
+ * Structural rather than `TelegramLoginState`, because the row is rendered from
+ * a `TelegramStatus` — which deliberately carries neither the code hash nor the
+ * attempt count, since neither is anything the shelf has an opinion about.
+ */
+export interface TelegramRowInput {
+  phase: TelegramPhase;
+  phone: string | null;
+  error: string | null;
+}
+
+/**
+ * The same row, for the connector that signs in with a phone number instead of
+ * through Composio.
+ *
+ * A Telegram login has states Composio's has no equivalent for — a code the user
+ * has not typed yet, a two-step password, a flood wait — and all of them are
+ * "partway through" rather than "connected", which is why they share the amber
+ * tone. Only "connected" offers Disconnect, because until the login finishes
+ * there is no session to end.
+ */
+export function telegramRowState(state: TelegramRowInput): ConnectorRowState {
+  switch (state.phase) {
+    case "connected":
+      return {
+        tone: "ok",
+        label: "Connected",
+        // The number, because that is what the user typed and will recognise;
+        // the account's @handle belongs on the step screen, which has room for it.
+        accountLabel: state.phone,
+        actionKind: "none",
+        actionLabel: "",
+        canDisconnect: true,
+      };
+    case "code":
+      return {
+        tone: "wait",
+        label: "Enter your code",
+        accountLabel: state.phone,
+        actionKind: "resume",
+        actionLabel: "Finish",
+        canDisconnect: false,
+      };
+    case "password":
+      return {
+        tone: "wait",
+        label: "Password needed",
+        accountLabel: state.phone,
+        actionKind: "resume",
+        actionLabel: "Finish",
+        canDisconnect: false,
+      };
+    case "error":
+      return {
+        tone: "bad",
+        // The full message is a sentence and belongs on the step screen; the row
+        // carries the verdict and where to go next.
+        label: "Needs attention",
+        accountLabel: state.phone,
+        actionKind: "resume",
+        actionLabel: "Try again",
         canDisconnect: false,
       };
     default:

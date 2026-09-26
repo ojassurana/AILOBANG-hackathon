@@ -12,7 +12,8 @@
 
 import assert from "node:assert/strict";
 import { CONNECTORS, isComposio } from "../src/connectors";
-import { composioRowState, connectedRowCount } from "../src/connector-state";
+import { composioRowState, connectedRowCount, telegramRowState } from "../src/connector-state";
+import { codeSent, idleLoginState, loginConnected, loginFailed, passwordNeeded } from "../src/telegram-session";
 
 let passed = 0;
 let failed = 0;
@@ -128,14 +129,101 @@ check("a connected row outside Composio is added, not merged", () => {
 });
 
 check("the count can never exceed the shelf it describes", () => {
-  assert.equal(
-    connectedRowCount(
-      CONNECTORS,
-      () => "ACTIVE",
-      CONNECTORS.filter((connector) => !isComposio(connector)).length,
-    ),
-    CONNECTORS.length,
+  // The two sources have to stay disjoint. A row is counted once by its toolkit
+  // through Composio and once through `otherConnected`, so if the Composio map
+  // ever claimed the toolkit a non-Composio row reports on, that row would be
+  // counted twice and the header would advertise an account that has no row.
+  const nonComposio = CONNECTORS.filter((connector) => !isComposio(connector));
+  const claimedToolkits = new Set(nonComposio.map((connector) => connector.toolkit));
+
+  const claimed = connectedRowCount(
+    CONNECTORS,
+    (toolkit) => (claimedToolkits.has(toolkit) ? undefined : "ACTIVE"),
+    nonComposio.length,
   );
+
+  assert.equal(claimed, CONNECTORS.length);
+  assert.ok(claimed <= CONNECTORS.length);
+});
+
+/* ---------------------------------------------------- the Telegram row */
+
+check("a Telegram row with no login reads as not connected", () => {
+  const row = telegramRowState(idleLoginState());
+  assert.equal(row.tone, null);
+  assert.equal(row.label, "Not connected");
+  assert.equal(row.actionKind, "connect");
+  assert.equal(row.canDisconnect, false);
+});
+
+check("a half-finished Telegram login reads as partway through, not failed", () => {
+  // Both a code still to type and a password still to type are the user's turn,
+  // not a failure, and neither has a session to end yet.
+  for (const state of [
+    codeSent("+15555550123", "hash-1", false, 1000),
+    passwordNeeded(codeSent("+15555550123", "hash-1", false, 1000)),
+  ]) {
+    const row = telegramRowState(state);
+    assert.equal(row.tone, "wait");
+    assert.equal(row.actionKind, "resume");
+    assert.equal(row.canDisconnect, false);
+    assert.equal(row.accountLabel, "+15555550123");
+  }
+});
+
+check("a failed Telegram login reads as needing attention", () => {
+  const row = telegramRowState(
+    loginFailed(codeSent("+15555550123", "hash-1", false, 1000), "Telegram is asking us to slow down."),
+  );
+  assert.equal(row.tone, "bad");
+  assert.equal(row.actionKind, "resume");
+  assert.equal(row.canDisconnect, false);
+});
+
+check("a connected Telegram row offers no second connect, only Disconnect", () => {
+  // Reconnecting a live session would only ask for a code again; the control
+  // that means something here is ending it.
+  const row = telegramRowState(loginConnected(5000));
+  assert.equal(row.tone, "ok");
+  assert.equal(row.label, "Connected");
+  assert.equal(row.actionKind, "none");
+  assert.equal(row.actionLabel, "");
+  assert.equal(row.canDisconnect, true);
+});
+
+check("a Telegram row shows a phone number whenever it has one", () => {
+  // The label is the only thing telling the user which account a row refers to.
+  const sent = codeSent("+15555550123", "hash-1", false, 1000);
+  for (const state of [
+    sent,
+    passwordNeeded(sent),
+    loginFailed(sent, "nope"),
+    { ...loginConnected(5000), phone: "+15555550123" },
+  ]) {
+    assert.equal(telegramRowState(state).accountLabel, "+15555550123");
+  }
+});
+
+check("only a signed-in Telegram login offers Disconnect", () => {
+  const sent = codeSent("+15555550123", "hash-1", false, 1000);
+  const offered = [
+    idleLoginState(),
+    sent,
+    passwordNeeded(sent),
+    loginFailed(sent, "nope"),
+    loginConnected(5000),
+  ]
+    .map((state) => telegramRowState(state).canDisconnect)
+    .filter(Boolean);
+  assert.deepEqual(offered, [true]);
+});
+
+check("no Telegram state reads as connected except connected", () => {
+  const sent = codeSent("+15555550123", "hash-1", false, 1000);
+  const ok = [idleLoginState(), sent, passwordNeeded(sent), loginFailed(sent, "nope")].map(
+    (state) => telegramRowState(state).tone,
+  );
+  assert.ok(!ok.includes("ok"));
 });
 
 /* ------------------------------------------------------- the kind discriminator */

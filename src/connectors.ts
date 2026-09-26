@@ -75,6 +75,21 @@ export const GOOGLE_GROUP: Connector = {
 /** Every Google service the one consent grants. */
 export const CONNECTORS: Connector[] = [
   {
+    // First on the shelf, and the only row that is the user's own account
+    // rather than a third-party grant: the agent sends and reads as them, which
+    // is why every send is read back for confirmation first.
+    slug: "telegram",
+    name: "Telegram",
+    blurb: "Send and read your messages",
+    capabilities: [
+      "Read messages as they arrive, from the moment you connect",
+      "Send a message to someone by their @username",
+      "See which chats have something new",
+    ],
+    kind: "telegram",
+    toolkit: "telegram",
+  },
+  {
     slug: "googledrive",
     name: "Google Drive",
     blurb: "Files and folders",

@@ -19,7 +19,12 @@ import {
   standaloneConnectors,
   type Connector,
 } from "./connectors";
-import { composioRowState, connectedRowCount } from "./connector-state";
+import {
+  composioRowState,
+  connectedRowCount,
+  telegramRowState,
+  type ConnectorRowState,
+} from "./connector-state";
 import {
   createConnectLink,
   deleteConnectedAccount,
@@ -30,12 +35,23 @@ import {
   type ConnectedAccount,
 } from "./composio";
 import { renderCallPage } from "./call-page";
+import { renderTelegramPage } from "./telegram-page";
+import type { TelegramStatus } from "./telegram";
 import type { Env } from "./env";
 import { routeAgentRequest } from "agents";
 
 export { VoiceAgent } from "./voice-agent";
+// Both classes are named in wrangler.jsonc migrations, and a migrated class is
+// only resolvable if the Worker entry actually exports it.
+export { TelegramSession } from "./telegram";
 
 const WORKOS_API = "https://api.workos.com";
+/**
+ * The URL segment `routeAgentRequest` derives from the `VOICE_AGENT` binding:
+ * it lowercases an all-caps binding name and swaps underscores for hyphens. If
+ * that binding is renamed, this has to move with it or calls stop routing.
+ */
+const VOICE_AGENT_ROUTE = "voice-agent";
 const SESSION_COOKIE = "alb_session";
 const PKCE_COOKIE = "alb_pkce";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
@@ -83,6 +99,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   // The voice agent's WebSocket. Its instance name is the user id, so the
   // session cookie decides who may reach which agent.
   if (path.startsWith("/agents/")) {
+    // routeAgentRequest exposes every Durable Object binding, not just the
+    // agents: adding one silently adds a route named after it. Only the voice
+    // agent has a public surface, so anything else is a 404 here.
+    const [, , namespace] = path.split("/");
+    if (namespace !== VOICE_AGENT_ROUTE) return new Response("Not found", { status: 404 });
+
     const session = await currentSession(request, env);
     if (!session) return new Response("Unauthorized", { status: 401 });
     if (path.split("/")[3] !== session.sub) return new Response("Forbidden", { status: 403 });
@@ -93,6 +115,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path.startsWith("/disconnect/")) {
     if (request.method !== "POST") return methodNotAllowed("POST");
     return disconnectToolkit(request, env, path.slice("/disconnect/".length));
+  }
+
+  // The Telegram login is a sequence of form posts — start, code, password,
+  // restart — so like /disconnect/ it sits above the GET-only gate. The screen
+  // itself is a GET and is handled in the switch below.
+  if (path.startsWith("/telegram/")) {
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return telegramAction(request, env, path);
   }
 
   if (request.method !== "GET" && request.method !== "HEAD") {
@@ -120,6 +150,8 @@ async function route(request: Request, env: Env): Promise<Response> {
       return finishLogin(request, env);
     case "/app":
       return appPage(request, env);
+    case "/telegram":
+      return telegramScreen(request, env);
     case "/call":
       return callPage(request, env);
     case "/auth/logout":
@@ -282,7 +314,9 @@ async function appPage(request: Request, env: Env): Promise<Response> {
 
   if (!warning) await resolveMissingLabels(env, accounts);
 
-  const html = renderConnectionsPage(session, accounts, {
+  const telegram = await telegramStatus(env, session.sub);
+
+  const html = renderConnectionsPage(session, accounts, telegram, {
     justConnected,
     justDisconnected,
     disconnectFailed,
@@ -417,6 +451,19 @@ async function disconnectToolkit(request: Request, env: Env, slug: string): Prom
 
   const target = new URL("/app", request.url);
 
+  // Telegram is not a Composio connection: there is one session, held by the
+  // user's own Durable Object, and revoking it is what erases what we read.
+  if (connector.kind === "telegram") {
+    try {
+      await telegramStub(env, session.sub).logout();
+      target.searchParams.set("disconnected", connector.slug);
+    } catch (error) {
+      console.error("telegram logout failed", error);
+      target.searchParams.set("disconnect_failed", connector.slug);
+    }
+    return seeOther(target.toString(), request);
+  }
+
   try {
     // A toolkit can hold more than one connection; disconnecting the app means
     // clearing all of them.
@@ -444,9 +491,131 @@ async function disconnectToolkit(request: Request, env: Env, slug: string): Prom
     target.searchParams.set("disconnect_failed", connector.slug);
   }
 
+  // 303 rather than 302: this route is a POST, and a refresh after a redirect
+  // has to re-read the page rather than submit the disconnect a second time.
+  return seeOther(target.toString(), request);
+}
+
+/* ----------------------------------------------------------------- telegram */
+
+/** The user's own Durable Object, named by the id the session already carries. */
+function telegramStub(env: Env, userId: string) {
+  return env.TELEGRAM_SESSION.get(env.TELEGRAM_SESSION.idFromName(userId));
+}
+
+/**
+ * The Telegram row's status, or null when it cannot be read.
+ *
+ * An object that has never been opened is not a failure: it exists the moment it
+ * is named and reports an idle login, which is the right answer for a user who
+ * has never connected.
+ */
+async function telegramStatus(env: Env, userId: string): Promise<TelegramStatus | null> {
+  try {
+    return await telegramStub(env, userId).status();
+  } catch (error) {
+    console.error("telegram status failed", error);
+    return null;
+  }
+}
+
+/** The login screen, showing whichever step the stored state has reached. */
+async function telegramScreen(
+  request: Request,
+  env: Env,
+  notice?: string | null,
+): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  const status = (await telegramStatus(env, session.sub)) ?? neverConnected;
+
+  return new Response(renderTelegramPage({ email: session.email, status, notice }), {
+    headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/** What a status read that failed is reported as: nothing connected yet. */
+const neverConnected: TelegramStatus = {
+  phase: "idle",
+  phone: null,
+  username: null,
+  error: null,
+  retryAt: null,
+  codeViaApp: false,
+  hasSession: false,
+};
+
+/**
+ * One of the four login form posts. Each hands a value to the object and
+ * redirects straight back, so the screen always renders what was recorded rather
+ * than what the request hoped had happened.
+ */
+async function telegramAction(request: Request, env: Env, path: string): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+  if (crossOrigin(request)) {
+    return errorPage(403, "Not allowed", "That request didn't come from this page.", {
+      back: { href: "/telegram", label: "Back to Telegram" },
+    });
+  }
+
+  const stub = telegramStub(env, session.sub);
+  const form = await request.formData();
+  const field = (name: string) => String(form.get(name) ?? "").trim();
+
+  switch (path) {
+    case "/telegram/start": {
+      const phone = field("phone");
+      if (!phone) return telegramScreen(request, env, "Enter your phone number first.");
+      await stub.beginLogin(phone);
+      break;
+    }
+    case "/telegram/code": {
+      const code = field("code");
+      if (!code) return telegramScreen(request, env, "Enter the code Telegram sent you.");
+      await stub.submitCode(code);
+      break;
+    }
+    case "/telegram/password": {
+      const password = field("password");
+      if (!password) return telegramScreen(request, env, "Enter your Telegram password.");
+      await stub.submitPassword(password);
+      break;
+    }
+    case "/telegram/restart":
+      await stub.restartLogin();
+      break;
+    default:
+      return errorPage(404, "Not found", "That page does not exist.");
+  }
+
+  return seeOther("/telegram", request);
+}
+
+/**
+ * Whether a form post came from somewhere other than this site.
+ *
+ * The session cookie is `SameSite=Lax`, so a cross-site POST does not carry it;
+ * this is the second lock on the same door. A missing `Origin` — a native client
+ * rather than a browser — is let through rather than treated as hostile.
+ */
+function crossOrigin(request: Request): boolean {
+  const origin = request.headers.get("Origin");
+  if (!origin) return false;
+  try {
+    return new URL(origin).host !== new URL(request.url).host;
+  } catch {
+    // An Origin that will not parse is not one of ours.
+    return true;
+  }
+}
+
+/** Turns a finished form post into a plain GET of the next page. */
+function seeOther(path: string, request: Request): Response {
   return new Response(null, {
-    status: 302,
-    headers: { Location: target.toString(), "Cache-Control": "no-store" },
+    status: 303,
+    headers: { Location: new URL(path, request.url).toString(), "Cache-Control": "no-store" },
   });
 }
 
@@ -472,6 +641,7 @@ async function finishConnect(request: Request, env: Env, path: string): Promise<
 function renderConnectionsPage(
   session: Session,
   accounts: Map<string, ConnectedAccount>,
+  telegram: TelegramStatus | null,
   flash: {
     justConnected: string | null;
     justDisconnected: string | null;
@@ -480,9 +650,13 @@ function renderConnectionsPage(
     warning: string | null;
   },
 ): string {
-  // Every row's status comes from Composio today, so nothing is added to the
-  // count; the denominator is the shelf itself, which keeps the two in step.
-  const connected = connectedRowCount(CONNECTORS, (toolkit) => accounts.get(toolkit)?.status);
+  // Composio answers for every row but Telegram's, which is counted through the
+  // third argument so the header and the shelf cannot disagree.
+  const connected = connectedRowCount(
+    CONNECTORS,
+    (toolkit) => accounts.get(toolkit)?.status,
+    telegram?.phase === "connected" ? 1 : 0,
+  );
 
   const googleAccount = accounts.get(GOOGLE_GROUP.toolkit);
   const groupServices = googleConnectors();
@@ -525,7 +699,11 @@ function renderConnectionsPage(
     .join("\n");
 
   const rows = standaloneConnectors()
-    .map((connector) => connectorRow(connector, accounts.get(connector.toolkit)))
+    .map((connector) =>
+      connector.kind === "telegram"
+        ? telegramConnectorRow(connector, telegram)
+        : connectorRow(connector, accounts.get(connector.toolkit)),
+    )
     .join("\n");
   let banner = "";
   if (flash.denied) {
@@ -834,6 +1012,10 @@ ${rows}
  * warn about the others rather than just naming the one clicked.
  */
 function disconnectConfirmText(connector: Connector): string {
+  if (connector.kind === "telegram") {
+    return `Disconnect ${connector.name}? The agent will stop being able to send and read your messages.`;
+  }
+
   const others = connectorsForToolkit(connector.toolkit).filter(
     (other) => other.slug !== connector.slug,
   );
@@ -848,12 +1030,31 @@ function disconnectConfirmText(connector: Connector): string {
   ).replace(/'/g, "\\'");
 }
 
+/** A row whose connection Composio holds and reports the status of. */
 function connectorRow(
   connector: Connector,
   account: ConnectedAccount | undefined,
   insideGroup = false,
 ): string {
-  const state = composioRowState(account?.status, account?.label);
+  return rowMarkup(connector, composioRowState(account?.status, account?.label), insideGroup);
+}
+
+/** The Telegram row, whose connection is this app's own object rather than Composio's. */
+function telegramConnectorRow(connector: Connector, telegram: TelegramStatus | null): string {
+  return rowMarkup(connector, telegramRowState(telegram ?? neverConnected));
+}
+
+/**
+ * The row markup, from an already-decided state.
+ *
+ * Split out so that a row whose status comes from somewhere other than Composio
+ * renders identically — same pill, same controls — without having to fake a
+ * `ConnectedAccount` to get there.
+ */
+function rowMarkup(connector: Connector, state: ConnectorRowState, insideGroup = false): string {
+  // Only Composio rows have a hosted sign-in to open; a row that connects
+  // another way owns its own screen.
+  const href = connector.kind === "telegram" ? "/telegram" : `/connect/${connector.slug}`;
 
   const stateCell = state.tone
     ? `<span class="pill"><span class="dot ${state.tone}"></span>${escapeHtml(state.label)}</span>${
@@ -866,11 +1067,14 @@ function connectorRow(
   let actionCell = "";
   if (!insideGroup) {
     const button =
-      state.actionKind === "reconnect"
-        ? `<a class="btn ghost" href="/connect/${connector.slug}">${escapeHtml(state.actionLabel)}</a>`
-        : `<a class="btn" href="/connect/${connector.slug}">${escapeHtml(state.actionLabel)}${
-            state.actionKind === "connect" ? `<span class="sm-hide"> now</span>` : ""
-          }</a>`;
+      // A finished connection has nothing worth offering but Disconnect.
+      state.actionKind === "none"
+        ? ""
+        : state.actionKind === "reconnect"
+          ? `<a class="btn ghost" href="${href}">${escapeHtml(state.actionLabel)}</a>`
+          : `<a class="btn" href="${href}">${escapeHtml(state.actionLabel)}${
+              state.actionKind === "connect" ? `<span class="sm-hide"> now</span>` : ""
+            }</a>`;
 
     const disconnect = state.canDisconnect
       ? `
