@@ -325,8 +325,19 @@ function renderConnectionsPage(
   if (flash.denied) {
     banner = `<p class="note bad">That connection didn't finish (${escapeHtml(flash.denied)}). You can try again below.</p>`;
   } else if (flash.justConnected) {
-    const name = connectorBySlug(flash.justConnected)?.name ?? "Account";
-    banner = `<p class="note ok">${escapeHtml(name)} connected.</p>`;
+    const connector = connectorBySlug(flash.justConnected);
+    const name = connector?.name ?? "That account";
+    const status = connector ? accounts.get(connector.slug)?.status : undefined;
+
+    // The return URL only means the user came back, not that consent succeeded,
+    // so report what Composio actually reports.
+    if (status === "ACTIVE") {
+      banner = `<p class="note ok">${escapeHtml(name)} connected.</p>`;
+    } else if (status === "PENDING") {
+      banner = `<p class="note wait">${escapeHtml(name)} is still finishing up. Refresh in a moment.</p>`;
+    } else {
+      banner = `<p class="note bad">We didn't get a confirmation from ${escapeHtml(name)}. You can try again below.</p>`;
+    }
   } else if (flash.warning) {
     banner = `<p class="note bad">${escapeHtml(flash.warning)}</p>`;
   }
@@ -381,6 +392,7 @@ function renderConnectionsPage(
       .who a { color: inherit; }
       .note { margin: 24px 0 0; padding: 12px 14px; border-radius: 12px; font-size: 14px; }
       .note.ok { background: rgba(26, 155, 82, 0.10); border: 1px solid rgba(26, 155, 82, 0.26); }
+      .note.wait { background: rgba(201, 134, 26, 0.10); border: 1px solid rgba(201, 134, 26, 0.26); }
       .note.bad { background: rgba(192, 57, 43, 0.10); border: 1px solid rgba(192, 57, 43, 0.26); }
       .card {
         margin-top: 28px;
