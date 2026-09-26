@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import {
   CODE_TTL_MS,
   MAX_CODE_ATTEMPTS,
-  PENDING_SEND_TTL_MS,
+  REPEAT_SEND_WINDOW_MS,
   SEND_CAPS,
   checkSendCaps,
   classifyTelegramError,
@@ -30,7 +30,7 @@ import {
   loginConnected,
   loginFailed,
   passwordNeeded,
-  pendingSendExpired,
+  repeatSentAt,
   restartLogin,
 } from "../src/telegram-session";
 
@@ -323,13 +323,29 @@ check("windows slide rather than reset on a boundary", () => {
   assert.equal(anHourLater.allowed, true);
 });
 
-/* ------------------------------------------------------ pending confirmation */
+/* -------------------------------------------------------------- repeat sends */
 
-check("a draft expires so an old yes cannot send it", () => {
-  const draft = { to: "@someone", toLabel: "Someone", text: "hi", preparedAt: now };
-  assert.equal(pendingSendExpired(draft, now + PENDING_SEND_TTL_MS - 1), false);
-  assert.equal(pendingSendExpired(draft, now + PENDING_SEND_TTL_MS + 1), true);
-  assert.equal(pendingSendExpired(null, now), true);
+check("the same text again moments later is the send that already happened", () => {
+  // "Send it", "send it", "have you sent it?" each re-read the conversation;
+  // one message must come out of all three.
+  const previous = [{ text: "Here's the doc: https://docs.google.com/d/1", at: now - 60_000 }];
+  assert.equal(repeatSentAt(previous, "Here's the doc: https://docs.google.com/d/1", now), now - 60_000);
+  assert.equal(repeatSentAt(previous, "  here's the DOC:   https://docs.google.com/d/1 ", now), now - 60_000);
+});
+
+check("a different message, or the same one much later, is a new send", () => {
+  const previous = [{ text: "On my way", at: now - 60_000 }];
+  assert.equal(repeatSentAt(previous, "Running late", now), null);
+  assert.equal(repeatSentAt(previous, "On my way", now - 60_000 + REPEAT_SEND_WINDOW_MS), null);
+  assert.equal(repeatSentAt([], "On my way", now), null);
+});
+
+check("of several earlier sends, the latest is the one reported", () => {
+  const previous = [
+    { text: "hi", at: now - 120_000 },
+    { text: "hi", at: now - 30_000 },
+  ];
+  assert.equal(repeatSentAt(previous, "hi", now), now - 30_000);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

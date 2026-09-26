@@ -101,13 +101,15 @@ is proven — AI Lobang just needs per-user routing on top.
 | `gmail.list_unread` | "what's unread" |
 | `gmail.read_thread` | "read me that thread" |
 | `gmail.create_draft` | "draft a reply saying I'll be late" |
-| `gmail.send` | "send it" (confirm-first) |
+| `gmail.send` | "send it" |
 | `gmail.archive` / `gmail.label` | "clear out the newsletters" |
 
 Rules baked into the agent prompt:
 
-- **Destructive = confirm out loud first.** Sending, deleting, archiving a
-  thread: the agent says what it's about to do and waits for a yes.
+- **Asking is the go-ahead.** Sending, creating, sharing: the agent does it on
+  the first request and says what it did. It asks back only when the request
+  is ambiguous (a name that fits two people), and a repeated request never
+  sends the same message twice.
 - **Never read a different account than the caller's.**
 - **Say when it can't.** No inventing mail it didn't fetch.
 

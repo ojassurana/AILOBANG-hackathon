@@ -26,13 +26,37 @@ const MAX_STEPS = 10;
 /** Tool output beyond this is noise for a spoken answer and slows the loop down. */
 const MAX_TOOL_CHARS = 6000;
 const MAX_ANSWER_CHARS = 1500;
+/** Earlier work carried into later runs; past this the oldest requests drop out. */
+const MAX_WORKLOG_CHARS = 8000;
+const WORKLOG_ARGS_CHARS = 400;
+const WORKLOG_OUTPUT_CHARS = 1000;
+/** Discovery calls: what they returned is no use to a later request. */
+const UNLOGGED_TOOLS = new Set(["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS"]);
 
 export const SYSTEM_PROMPT = `## Voice conversation context
 You are the backend for an assistant in a live voice call. You do not speak:
 you return one short, factual result that the voice assistant reads aloud.
-Transcripts can contain mistakes, unfinished phrases and corrections. Use the
-latest context and verified tool results. If a needed detail is missing, say
-which detail you still need instead of guessing.
+Transcripts can contain mistakes, unfinished phrases and corrections. Act on the
+caller's latest request, using the earlier context and verified tool results. If
+a needed detail is missing, say which detail you still need instead of guessing.
+
+## Act on the first ask
+The caller asking is the go-ahead. When they ask you to send, create, write,
+share or schedule something, do it now with the tools and report what was done.
+Never prepare something and ask them to confirm it, never ask "shall I send
+it?", and never answer with a plan of what you are about to do. Ask only when
+something you need is genuinely missing or ambiguous: which of several people a
+name means, or what a message should say when they gave no hint of it. When they
+say "send it" or "go ahead", that is a request to do the thing they asked for
+just before, now.
+
+## Earlier in this call
+The request can come with a record of what you already did earlier in this
+call. Those are real, finished tool results. Never redo anything that record
+shows as done: no second document, no second message. Build on it instead, for
+example by reusing the link of a document you already created. When the caller
+asks whether something happened ("have you sent it?", "is the doc made?"),
+answer from that record.
 
 ## Connected accounts
 The tools below act on the caller's own connected accounts: Google (Gmail, Drive,
@@ -55,24 +79,19 @@ them since they connected and telegram_read_messages reads one of them. Nothing
 from before the connection exists, so say that rather than implying a longer
 history.
 
-Sending takes two calls and both are required:
-1. telegram_prepare_send with the person's name or @username, and the exact text.
-   It stores the message and returns the person it settled on. Nothing has been
-   sent yet.
-2. Read it back to the caller and ask them to confirm. Only after they say yes,
-   call telegram_confirm_send, which takes no arguments and sends exactly what was
-   prepared. A caller who changes the wording needs it prepared again first.
-Say a message was sent only when telegram_confirm_send says it was.
+Sending is one call: telegram_send with the person's name or @username and the
+exact text. It sends straight away; do not ask the caller to confirm first. Say
+a message was sent only when telegram_send says it was, and then say who it went
+to. When the message should carry something another tool makes (a document's
+link, say), make that first and put the real result in the text.
 
-The caller never has to spell out a handle. When they name a person — a first
-name, a nickname, a full name — call telegram_find_contact with the name as they
-said it and use what it returns. One match is that person. Several means the name
-is not enough on its own, so ask which they mean rather than choosing. A match
-with no @username is still someone to send to: the message goes to their account,
-and a name is enough to reach them, so never tell the caller a handle is needed.
-When telegram_prepare_send reports an @username it is the one the message goes
-to, so read it out along with the text; when it reports none, name the person
-anyway. Never tell the caller a name was not found without having looked it up.
+The caller never has to spell out a handle. Pass the name as they said it — a
+first name, a nickname, a full name — and telegram_send resolves it. If several
+people fit, it sends nothing and lists them: ask which one they mean rather than
+choosing. A person with no @username is still someone to send to, so never tell
+the caller a handle is needed. telegram_find_contact is for questions about who
+someone is, not a step before sending. Never tell the caller a name was not found
+without having looked it up.
 
 ## Web search
 web_search looks things up on the live internet. Use it for anything about the
@@ -110,8 +129,7 @@ const PROGRESS_NOTES: Record<string, string> = {
   telegram_list_chats: "Looking through your Telegram.",
   telegram_read_messages: "Reading your Telegram messages.",
   telegram_find_contact: "Working out who you mean.",
-  telegram_prepare_send: "Writing that message.",
-  telegram_confirm_send: "Sending that now.",
+  telegram_send: "Sending the Telegram message.",
   [RUN_CODE]: "Working through that now.",
 };
 
@@ -148,6 +166,14 @@ export class ConnectorHarness {
   /** Null when the caller's Telegram object could not be reached at all. */
   private readonly telegram: TelegramToolbox | null;
   private readonly code: CodeToolbox | null;
+  /**
+   * What each earlier run on this harness did, one block per request.
+   *
+   * Every request re-reads the conversation, but the conversation holds only
+   * what was said aloud: without this, a later "send it" or "have you sent it?"
+   * cannot see the document it made or the message it sent, and does it again.
+   */
+  private readonly worklog: string[] = [];
 
   constructor(
     private readonly mcp: McpClient,
@@ -191,11 +217,35 @@ export class ConnectorHarness {
 
     const messages: ChatMessage[] = [
       { role: "system", content: options?.system ?? SYSTEM_PROMPT },
-      { role: "user", content: `Conversation so far:\n${transcript}` },
+      { role: "user", content: requestContent(transcript, this.worklog) },
     ];
     const maxAnswer = options?.maxAnswerChars ?? MAX_ANSWER_CHARS;
 
     const steps: string[] = [];
+    const done: string[] = [];
+    let answer: string | null = null;
+
+    try {
+      answer = await this.loop(messages, schemas, steps, done, onProgress);
+    } finally {
+      // Recorded even when the run throws: a half-done job is exactly what the
+      // next request must not start over.
+      this.remember(done, answer);
+    }
+
+    return {
+      text: truncate(answer ?? "I could not find that. Please try asking again.", maxAnswer),
+      steps,
+    };
+  }
+
+  private async loop(
+    messages: ChatMessage[],
+    schemas: ToolSchema[],
+    steps: string[],
+    done: string[],
+    onProgress: (note: string) => void,
+  ): Promise<string | null> {
     let answer: string | null = null;
 
     for (let step = 0; step < MAX_STEPS; step++) {
@@ -237,6 +287,11 @@ export class ConnectorHarness {
         }
 
         messages.push({ role: "tool", tool_call_id: call.id, content: truncate(output, MAX_TOOL_CHARS) });
+        if (!UNLOGGED_TOOLS.has(call.name)) {
+          done.push(
+            `${call.name} ${truncate(call.arguments, WORKLOG_ARGS_CHARS)} -> ${truncate(output, WORKLOG_OUTPUT_CHARS)}`,
+          );
+        }
       }
     }
 
@@ -253,10 +308,24 @@ export class ConnectorHarness {
       answer = reply.content?.trim() || null;
     }
 
-    return {
-      text: truncate(answer ?? "I could not find that. Please try asking again.", maxAnswer),
-      steps,
-    };
+    return answer;
+  }
+
+  /** Adds one run to the worklog, keeping the newest requests within the cap. */
+  private remember(done: string[], answer: string | null): void {
+    if (!done.length && !answer) return;
+
+    const lines = [
+      `Request at ${new Date().toISOString()}:`,
+      ...(done.length ? done.map((line) => `  ${line}`) : ["  (no tools used)"]),
+      `  Answer given: ${answer ?? "(none — the run stopped before answering)"}`,
+    ];
+    this.worklog.push(lines.join("\n"));
+
+    let total = this.worklog.reduce((sum, block) => sum + block.length, 0);
+    while (this.worklog.length > 1 && total > MAX_WORKLOG_CHARS) {
+      total -= this.worklog.shift()!.length;
+    }
   }
 
   private async mcpCall(name: string, rawArguments: string): Promise<string> {
@@ -275,6 +344,16 @@ export class ConnectorHarness {
 
     return results.map((result) => `${result.title}\n${result.url}\n${result.text}`).join("\n\n");
   }
+}
+
+/** The run's opening message: the earlier work, when there is any, then the conversation. */
+function requestContent(transcript: string, worklog: readonly string[]): string {
+  const conversation = `Conversation so far (act on the caller's latest request):\n${transcript}`;
+  if (!worklog.length) return conversation;
+  return (
+    "Already done earlier in this call. These are real tool results, so do not redo any of it:\n" +
+    `${worklog.join("\n")}\n\n${conversation}`
+  );
 }
 
 /** MCP tools describe arguments with JSON Schema, which is what the model wants. */

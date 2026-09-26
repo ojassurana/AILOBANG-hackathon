@@ -84,8 +84,10 @@ evaluate teleproto before scaling rather than migrating speculatively.
 
 A Telegram user session **is** the account. There is no read-only scope. Telegram's
 own docs say accounts signing in through unofficial clients are placed under
-observation, and that flooding or spam means permanent bans. Send caps and
-confirm-before-send are therefore product requirements, not polish.
+observation, and that flooding or spam means permanent bans. Send caps and the
+repeat-send guard are therefore product requirements, not polish. A send goes out
+on the first request, with no spoken confirmation; a name that fits more than one
+person sends nothing.
 
 ## 7. Unblocking the next step
 

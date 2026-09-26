@@ -156,8 +156,8 @@ export function sendable(person: SendTarget): boolean {
 }
 
 /**
- * The address a prepared send is stored under: the @handle, or the user id when
- * there is none.
+ * The address a send is recorded under: the @handle, or the user id when there
+ * is none.
  *
  * The hash is absent by construction. This string is the only thing about the
  * recipient that outlives the request, and a stored hash is the one input a send
@@ -254,9 +254,9 @@ export function storedPeople(rows: { chat: string; title: string }[]): NamedPers
 /**
  * Whether a spoken name settles on someone that can be sent to.
  *
- * The caller's next word is "yes", so anything other than exactly one person has
- * to stop here: choosing between two would send a private message to the wrong
- * one. A person with no @username is not that case — they are reached by their
+ * The message goes out as soon as a name settles, so anything other than exactly
+ * one person has to stop here: choosing between two would send a private message
+ * to the wrong one. A person with no @username is not that case — they are reached by their
  * account, so they settle on the same terms as anyone else.
  */
 export function resolveSpokenName(spoken: string, people: ContactCandidate[]): Resolution {
@@ -276,7 +276,7 @@ export function resolveSpokenName(spoken: string, people: ContactCandidate[]): R
       kind: "refuse",
       reason:
         `${asked} could be ${people.length} people: ${people.map(describeCandidate).join(", ")}. ` +
-        `Ask the caller which one they mean, then prepare the message again naming that person.`,
+        `Ask the caller which one they mean, then send it again naming that person.`,
     };
   }
 

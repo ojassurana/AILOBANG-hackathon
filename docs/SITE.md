@@ -167,9 +167,9 @@ Notes worth keeping in mind:
   the model writes one JavaScript program and it runs in a Dynamic Worker (the `LOADER` Worker
   Loader binding) with no network and no secrets. The program's only way out is `composio.*`,
   `web.search` and `telegram.*`, which call back into the Durable Object; `composio.readFile`
-  fetches only Composio's own download links, and a program can prepare a Telegram message but
-  never send one. The model reaches for it when steps depend on each other or repeat over many
-  items; single lookups still go through the ordinary tools.
+  fetches only Composio's own download links, and `telegram.send` goes through the same caps and
+  repeat-send guard as the `telegram_send` tool. The model reaches for it when steps depend on
+  each other or repeat over many items; single lookups still go through the ordinary tools.
 - Audio only flows one way through the model when the caller's microphone stream is flowing. The
   page streams silence from the moment the call connects, including while the caller is quiet;
   without that, appended context is never acknowledged.

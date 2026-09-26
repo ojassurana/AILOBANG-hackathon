@@ -77,7 +77,7 @@ export const CONNECTORS: Connector[] = [
   {
     // First on the shelf, and the only row that is the user's own account
     // rather than a third-party grant: the agent sends and reads as them, which
-    // is why every send is read back for confirmation first.
+    // is why sending is capped and a name that fits two people sends nothing.
     slug: "telegram",
     name: "Telegram",
     blurb: "Send and read your messages",

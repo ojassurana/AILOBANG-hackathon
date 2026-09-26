@@ -371,14 +371,10 @@ export class VoiceAgent extends Agent<Env> {
       });
 
       const harness = await this.getHarness();
+      // Step notes go to the page only: GPT-Live speaks the thinking it is
+      // handed, and by the time it does, the step it names is long finished.
       const result = await harness.run(transcript, (note) => {
         this.broadcast(JSON.stringify({ type: "working", note }));
-        this.sendLive({
-          type: "session.thinking.append",
-          event_id: `progress_${Date.now()}`,
-          delegation_id: delegationId,
-          content: note,
-        });
       });
 
       this.sendLive({
@@ -445,7 +441,7 @@ export class VoiceAgent extends Agent<Env> {
     return this.transcript
       .map((line) => `${line.role === "user" ? "Caller" : "Assistant"}: ${line.text.trim()}`)
       .join("\n")
-      .slice(-4000);
+      .slice(-8000);
   }
 
   private sendLive(payload: unknown): void {
@@ -463,7 +459,11 @@ Backend tools: the backend can read and act on the caller's connected accounts â
 
 That is what the backend is able to do, not a list of what is connected. Never say that an account is or is not connected, and never name what they have connected, from memory or from that list: the backend is the only thing that knows, so delegate and let its answer be what you say. Never tell the caller they have not connected something without having asked the backend in this call.
 
-Telegram is by name: a person's name is enough, so never ask the caller for a username or handle. Say you will find them, then delegate, and the backend resolves the name. A contact with no public username can still be messaged, so never tell the caller a handle is needed. If a name fits more than one person the backend will come back and ask which one, so never guess.
+Asking is the go-ahead. When the caller asks you to send a message, make a document or do anything else on their accounts, delegate it straight away and let the backend do it in one go. Never ask "shall I send it?", never offer to send once they say yes, and never read a message back for approval. The backend acts on the first request, and only asks back when something is genuinely unclear.
+
+When the backend says something is done, it is done: say so plainly and do not describe it as still in progress. When the caller asks whether something happened, delegate and let the backend answer from what it actually did.
+
+Telegram is by name: a person's name is enough, so never ask the caller for a username or handle. The backend resolves the name. A contact with no public username can still be messaged, so never tell the caller a handle is needed. If a name fits more than one person the backend will come back and ask which one, so never guess.
 
 Delegate to the backend when:
 - the request needs data from, or an action on, one of those accounts;
@@ -475,7 +475,7 @@ Never answer a question about current events or the caller's own data from memor
 
 Do not delegate for greetings, thanks, small talk, or anything you can already answer from the conversation.
 
-Delegate before answering anything that depends on backend work, then keep the caller company briefly while it runs. Never say an account action happened unless the backend confirmed it. Never guess at private data.`;
+Delegate before answering anything that depends on backend work, then keep the caller company briefly while it runs, with one short line rather than a running commentary. Never say an account action happened unless the backend confirmed it. Never guess at private data.`;
 }
 
 function toBytes(message: ArrayBuffer | ArrayBufferView): Uint8Array {

@@ -8,13 +8,13 @@
  *
  * They keep the promises the screens make. Reading is forward-only — the stored
  * messages begin at the login, so there is nothing older to return even by
- * accident. Sending is two calls, and the message goes out on the second one
- * only, after the caller has heard it read back and said yes; the object holds
- * exactly one prepared message so that "yes" can only mean the last one.
+ * accident. Sending is one call: the caller asking is the go-ahead, and the
+ * object refuses a name that fits more than one person and answers a repeat of
+ * a message it just sent as already done.
  */
 
 import type { ToolSchema } from "./deepseek";
-import type { ChatSummary, MessageLine, PrepareResult, SendResult, TelegramStatus } from "./telegram";
+import type { ChatSummary, MessageLine, SendResult, TelegramStatus } from "./telegram";
 import { type ContactCandidate, type ContactSource, describeCandidate } from "./telegram-contacts";
 
 /** The part of `TelegramSession` these tools use. */
@@ -23,15 +23,13 @@ export interface TelegramActions {
   listChats(limit?: number): Promise<ChatSummary[]>;
   readMessages(chat: string, limit?: number): Promise<MessageLine[]>;
   findContacts(name: string): Promise<ContactCandidate[]>;
-  prepareSend(to: string, text: string): Promise<PrepareResult>;
-  sendPending(): Promise<SendResult>;
+  send(to: string, text: string): Promise<SendResult>;
 }
 
 const LIST_CHATS = "telegram_list_chats";
 const READ_MESSAGES = "telegram_read_messages";
 const FIND_CONTACT = "telegram_find_contact";
-const PREPARE_SEND = "telegram_prepare_send";
-const CONFIRM_SEND = "telegram_confirm_send";
+const SEND = "telegram_send";
 
 /** Where a candidate was found, said the way it would be said out loud. */
 const SOURCE_NOTE: Record<ContactSource, string> = {
@@ -88,13 +86,12 @@ export const TELEGRAM_TOOLS: ToolSchema[] = [
     function: {
       name: FIND_CONTACT,
       description:
-        "Find who the caller means when they name a person, so a message can be sent without them " +
-        "spelling out an @username. Use this every time the caller names a recipient — a first name, " +
-        "a nickname, a full name — before calling telegram_prepare_send. It matches the chats already " +
-        "read, then the caller's Telegram contacts, then Telegram search, and returns up to five " +
-        "people with their @usernames. One match can be sent to; several mean you must ask which. " +
-        "Someone with no @username is still a match: the message goes to their account, so never " +
-        "tell the caller a handle is needed.",
+        "Look up who the caller means by a name — a first name, a nickname, a full name — when they " +
+        "ask who someone is or which of several people a name fits. Not needed before sending: " +
+        "telegram_send resolves the name itself. It matches the chats already read, then the caller's " +
+        "Telegram contacts, then Telegram search, and returns up to five people with their @usernames. " +
+        "Someone with no @username is still a match: a message reaches their account, so never tell " +
+        "the caller a handle is needed.",
       parameters: {
         type: "object",
         properties: {
@@ -110,14 +107,15 @@ export const TELEGRAM_TOOLS: ToolSchema[] = [
   {
     type: "function",
     function: {
-      name: PREPARE_SEND,
+      name: SEND,
       description:
-        "Prepare a Telegram message for the caller to confirm. This does NOT send anything. Give the " +
-        "exact text so it can be read back to them; nothing goes out until they say yes and you call " +
-        "telegram_confirm_send. Name the recipient however the caller named them: a spoken name or an " +
-        "@username — a name is enough, and a contact with no @username is still someone the message " +
-        "reaches, so never ask the caller for a handle. A name that more than one person answers to " +
-        "is refused with the candidates, so never guess between them.",
+        "Send a Telegram message from the caller's own account, right now. The caller asking for it " +
+        "is the go-ahead: do not ask them to confirm first, and call this once per message. Name the " +
+        "recipient however the caller named them: a spoken name or an @username — a name is enough, " +
+        "and a contact with no @username is still someone the message reaches, so never ask the " +
+        "caller for a handle. A name that more than one person answers to is refused with the " +
+        "candidates, and nothing is sent; ask which one they mean. Sending the same text to the same " +
+        "person again within a few minutes does not send twice: it reports the earlier send.",
       parameters: {
         type: "object",
         properties: {
@@ -132,20 +130,9 @@ export const TELEGRAM_TOOLS: ToolSchema[] = [
       },
     },
   },
-  {
-    type: "function",
-    function: {
-      name: CONFIRM_SEND,
-      description:
-        "Send the Telegram message that telegram_prepare_send last prepared, once the caller has " +
-        "heard it read back and said yes. Takes no arguments: it always means that prepared message, " +
-        "which stops being available a couple of minutes after it was prepared. Call it once.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
 ];
 
-const TOOL_NAMES = new Set([LIST_CHATS, READ_MESSAGES, FIND_CONTACT, PREPARE_SEND, CONFIRM_SEND]);
+const TOOL_NAMES = new Set([LIST_CHATS, READ_MESSAGES, FIND_CONTACT, SEND]);
 
 export function isTelegramTool(name: string): boolean {
   return TOOL_NAMES.has(name);
@@ -173,10 +160,8 @@ export class TelegramToolbox {
         return this.readMessages(rawArguments);
       case FIND_CONTACT:
         return this.findContact(rawArguments);
-      case PREPARE_SEND:
-        return this.prepareSend(rawArguments);
-      case CONFIRM_SEND:
-        return this.confirmSend();
+      case SEND:
+        return this.send(rawArguments);
       default:
         return `There is no Telegram tool called ${name}.`;
     }
@@ -280,11 +265,9 @@ export class TelegramToolbox {
     if (people.length === 1) {
       const [only] = people;
       return only.username
-        ? `One person matches "${name}": ${described(only)}.\n` +
-            `Send to ${only.username}. Read the name back as you confirm, so the caller hears who it is going to.`
-        : `One person matches "${name}": ${described(only)}.\n` +
-            `Send to ${only.title} by name — an @username is not needed. Read the name back as you ` +
-            `confirm, so the caller hears who it is going to.`;
+        ? `One person matches "${name}": ${described(only)}. ${SEND} with ${only.username} reaches them.`
+        : `One person matches "${name}": ${described(only)}. ${SEND} with the name ${only.title} ` +
+            `reaches them — an @username is not needed.`;
     }
 
     return [
@@ -294,29 +277,24 @@ export class TelegramToolbox {
     ].join("\n");
   }
 
-  private async prepareSend(rawArguments: string): Promise<string> {
+  private async send(rawArguments: string): Promise<string> {
     const args = parseArguments(rawArguments);
     const to = text(args.to);
     const body = text(args.text);
-    if (!to) return `Give ${PREPARE_SEND} who to send to: the name the caller said, or their @username.`;
-    if (!body) return `Give ${PREPARE_SEND} the exact message text.`;
+    if (!to) return `Give ${SEND} who to send to: the name the caller said, or their @username.`;
+    if (!body) return `Give ${SEND} the exact message text.`;
 
-    const prepared = await this.telegram.prepareSend(to, body);
-    if (!prepared.ok || !prepared.text) {
-      return prepared.reason ?? "That message could not be prepared.";
-    }
-
-    return [
-      `Prepared, and NOT sent yet. To: ${addressed(prepared.title ?? prepared.to ?? "them", prepared.to)}.`,
-      `Message: "${prepared.text}"`,
-      `Read that back to the caller and ask them to confirm. Call ${CONFIRM_SEND} only after they say yes.`,
-    ].join("\n");
-  }
-
-  private async confirmSend(): Promise<string> {
-    const sent = await this.telegram.sendPending();
+    const sent = await this.telegram.send(to, body);
     if (!sent.ok) return sent.reason ?? "The message was not sent.";
-    return `Sent to ${addressed(sent.title ?? sent.to ?? "them", sent.to)}.`;
+
+    const who = addressed(sent.title ?? sent.to ?? "them", sent.to);
+    if (sent.alreadySentAt !== null) {
+      return (
+        `Already sent to ${who} at ${iso(sent.alreadySentAt)}: "${sent.text ?? body}". It was not sent ` +
+        `again. Tell the caller it has gone.`
+      );
+    }
+    return `Sent to ${who}: "${sent.text ?? body}".`;
   }
 }
 

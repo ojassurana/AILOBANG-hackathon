@@ -3,8 +3,8 @@
  *
  * This is a **user session**, not a bot: the caller logs in with their phone
  * number and Telegram issues a session for their real account. There is no
- * read-only scope for such a session, which is why every send goes through a
- * confirmation and why the caps in `telegram-session.ts` exist.
+ * read-only scope for such a session, which is why the caps and the repeat-send
+ * guard in `telegram-session.ts` exist.
  *
  * Three properties are structural here rather than promised:
  *
@@ -37,7 +37,7 @@ import {
   storedPeople,
 } from "./telegram-contacts";
 import {
-  type PendingSend,
+  REPEAT_SEND_WINDOW_MS,
   type TelegramLoginState,
   type TelegramPhase,
   classifyTelegramError,
@@ -48,7 +48,7 @@ import {
   loginConnected,
   loginFailed,
   passwordNeeded,
-  pendingSendExpired,
+  repeatSentAt,
   restartLogin,
 } from "./telegram-session";
 import { password as passwordHelper } from "teleproto";
@@ -115,23 +115,20 @@ export interface Recipient {
   cold: boolean;
 }
 
-export interface PrepareResult {
-  /** False when the send was refused, with `reason` saying why. */
-  ok: boolean;
-  reason: string | null;
-  /** The @handle it will go to, or null when the account has no handle to name. */
-  to: string | null;
-  title: string | null;
-  /** Exactly the text to read back for confirmation. */
-  text: string | null;
-}
-
 export interface SendResult {
+  /** False when nothing went out, with `reason` saying why. */
   ok: boolean;
   reason: string | null;
   /** The @handle it went to, or null when the account has no handle to name. */
   to: string | null;
   title: string | null;
+  /** Exactly the text that went out. */
+  text: string | null;
+  /**
+   * Set when this exact message had already gone to this person moments ago,
+   * so it was not sent again: when that earlier send happened.
+   */
+  alreadySentAt: number | null;
 }
 
 // `SqlStorageValue` is what the Durable Object SQL cursor can hand back, so the
@@ -245,13 +242,13 @@ export class TelegramSession extends DurableObject<Env> {
       cold INTEGER NOT NULL,
       chat TEXT NOT NULL
     )`);
-    /** At most one row, ever: the single message awaiting a yes. */
-    sql.exec(`CREATE TABLE IF NOT EXISTS pending_send (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      to_text TEXT NOT NULL,
-      to_label TEXT NOT NULL,
+    // Created by earlier versions for a draft awaiting a yes; nothing reads it now.
+    sql.exec(`DROP TABLE IF EXISTS pending_send`);
+    /** What went to whom lately, so a repeated request does not send twice. */
+    sql.exec(`CREATE TABLE IF NOT EXISTS recent_sends (
+      send_key TEXT NOT NULL,
       text TEXT NOT NULL,
-      prepared_at INTEGER NOT NULL
+      at INTEGER NOT NULL
     )`);
   }
 
@@ -337,7 +334,7 @@ export class TelegramSession extends DurableObject<Env> {
     sql.exec(`DELETE FROM messages`);
     sql.exec(`DELETE FROM recipients`);
     sql.exec(`DELETE FROM send_log`);
-    sql.exec(`DELETE FROM pending_send`);
+    sql.exec(`DELETE FROM recent_sends`);
   }
 
   /* ---------------------------------------------------------------- sessions */
@@ -1089,115 +1086,76 @@ export class TelegramSession extends DurableObject<Env> {
   }
 
   /**
-   * Stores one message as the thing awaiting a yes, and sends nothing.
+   * Resolves who `to` names and sends them the message, in one call.
    *
-   * Exactly one is kept: the caller's "yes" arrives as a separate request that
-   * can only see the conversation, so it cannot quote an identifier back to us.
-   * The single stored draft with a short life is what makes "send it" mean the
-   * message just read back, and nothing staler.
-   *
-   * What the draft keeps about the recipient is the address and nothing more:
-   * a handle when there is one, otherwise the user id to find them by again.
-   * The access hash that came with the lookup is not written anywhere — it is
-   * what expires, and the send fetches its own.
-   */
-  async prepareSend(to: string, text: string): Promise<PrepareResult> {
-    const body = text.trim();
-    if (!body) return { ok: false, reason: "There was no message to send.", to: null, title: null, text: null };
-
-    const blocked = this.notConnectedReason();
-    if (blocked) {
-      return { ok: false, reason: blocked, to: null, title: null, text: null };
-    }
-
-    const settled = await this.recipientFor(to);
-    if ("reason" in settled) {
-      return { ok: false, reason: settled.reason, to: null, title: null, text: null };
-    }
-    const recipient = settled.recipient;
-
-    const verdict = this.capVerdict(sendKey(sendAddress(recipient)));
-    if (!verdict.allowed) {
-      return { ok: false, reason: verdict.reason, to: recipient.username, title: recipient.title, text: null };
-    }
-
-    this.ctx.storage.sql.exec(`DELETE FROM pending_send`);
-    this.ctx.storage.sql.exec(
-      `INSERT INTO pending_send (id, to_text, to_label, text, prepared_at) VALUES (1, ?, ?, ?, ?)`,
-      sendAddress(recipient),
-      recipient.title,
-      body,
-      Date.now(),
-    );
-    return { ok: true, reason: null, to: recipient.username, title: recipient.title, text: body };
-  }
-
-  private readPending(): PendingSend | null {
-    const rows = this.ctx.storage.sql
-      .exec<{ to_text: string; to_label: string; text: string; prepared_at: number }>(
-        `SELECT * FROM pending_send WHERE id = 1`,
-      )
-      .toArray();
-    if (!rows.length) return null;
-    const row = rows[0];
-    return { to: row.to_text, toLabel: row.to_label, text: row.text, preparedAt: row.prepared_at };
-  }
-
-  /**
-   * Sends whatever was last prepared. Takes no argument: the model's "yes" is a
-   * second run that cannot carry an id it was never told, so the pending draft
-   * is the only thing this can mean.
+   * The caller asking is the go-ahead, so nothing waits for a second yes. What
+   * still stops a send: a name that fits more than one person, the caps, and
+   * this exact text having gone to this person moments ago — the request is
+   * re-read on every turn of a call, and "send it" said twice is one message.
    *
    * A handle addresses the peer on its own. A user id does not: it needs an
    * access hash, and this is where that hash is obtained — by looking the id up
    * again, in the same call as the send itself. Nothing in storage holds a hash,
    * so there is none to go stale.
    */
-  async sendPending(): Promise<SendResult> {
+  async send(to: string, text: string): Promise<SendResult> {
+    const refused = (reason: string, title: string | null = null): SendResult => ({
+      ok: false,
+      reason,
+      to: null,
+      title,
+      text: null,
+      alreadySentAt: null,
+    });
+
+    const body = text.trim();
+    if (!body) return refused("There was no message to send.");
+
     const blocked = this.notConnectedReason();
-    if (blocked) return { ok: false, reason: blocked, to: null, title: null };
+    if (blocked) return refused(blocked);
 
-    const pending = this.readPending();
-    if (pendingSendExpired(pending, Date.now())) {
-      this.ctx.storage.sql.exec(`DELETE FROM pending_send`);
-      return {
-        ok: false,
-        reason: "That message is no longer waiting to go — ask me to send it again.",
-        to: null,
-        title: null,
-      };
-    }
+    const settled = await this.recipientFor(to);
+    if ("reason" in settled) return refused(settled.reason);
+    const recipient = settled.recipient;
+    const address = sendAddress(recipient);
+    const key = sendKey(address);
+    const done = (alreadySentAt: number | null): SendResult => ({
+      ok: true,
+      reason: null,
+      to: spokenAddress(address),
+      title: recipient.title,
+      text: body,
+      alreadySentAt,
+    });
 
-    const verdict = this.capVerdict(sendKey(pending!.to));
-    if (!verdict.allowed) {
-      return { ok: false, reason: verdict.reason, to: spokenAddress(pending!.to), title: pending!.toLabel };
-    }
+    const repeat = repeatSentAt(this.recentSends(key), body, Date.now());
+    if (repeat !== null) return done(repeat);
 
-    const userId = addressUserId(pending!.to);
+    const verdict = this.capVerdict(key);
+    if (!verdict.allowed) return refused(verdict.reason ?? "That can't be sent right now.", recipient.title);
+
+    const userId = addressUserId(address);
     try {
       const sent = await this.withClient(async (client) => {
-        if (userId === null) return client.sendMessage(pending!.to, { message: pending!.text });
+        if (userId === null) return client.sendMessage(address, { message: body });
 
-        // The id is all the draft kept, so the peer is built from the hash this
-        // call fetches. A stored hash would address whoever it points at now,
-        // which is why a failed lookup sends nothing instead.
-        const peer = await this.peerForUserId(client, userId, pending!.toLabel);
-        return peer ? client.sendMessage(peer, { message: pending!.text }) : null;
+        // The id is all the lookup kept, so the peer is built from the hash
+        // this call fetches. A stored hash would address whoever it points at
+        // now, which is why a failed lookup sends nothing instead.
+        const peer = await this.peerForUserId(client, userId, recipient.title);
+        return peer ? client.sendMessage(peer, { message: body }) : null;
       });
 
       if (!sent) {
-        return {
-          ok: false,
-          reason:
-            `Telegram isn't giving me ${pending!.toLabel} to send to, so nothing was sent. Say that ` +
+        return refused(
+          `Telegram isn't giving me ${recipient.title} to send to, so nothing was sent. Say that ` +
             `plainly: retrying the same name will not change it, and only an @username the caller ` +
             `knows would reach them.`,
-          to: null,
-          title: pending!.toLabel,
-        };
+          recipient.title,
+        );
       }
 
-      this.recordSend(pending!);
+      this.recordSend(address, recipient.title, body);
       if (sent.className === "Message") {
         const line = this.storable(sent as Api.Message, new Map());
         if (line) {
@@ -1207,7 +1165,7 @@ export class TelegramSession extends DurableObject<Env> {
              ON CONFLICT(chat, message_id) DO UPDATE SET text = excluded.text`,
             line.chat,
             line.messageId,
-            pending!.toLabel,
+            recipient.title,
             "you",
             1,
             line.text,
@@ -1218,11 +1176,20 @@ export class TelegramSession extends DurableObject<Env> {
     } catch (error) {
       this.recordLoginError(error);
       const classified = classifyTelegramError(error, telegramErrorShape(error));
-      return { ok: false, reason: classified.message, to: spokenAddress(pending!.to), title: pending!.toLabel };
+      return refused(classified.message, recipient.title);
     }
 
-    this.ctx.storage.sql.exec(`DELETE FROM pending_send`);
-    return { ok: true, reason: null, to: spokenAddress(pending!.to), title: pending!.toLabel };
+    return done(null);
+  }
+
+  private recentSends(key: string): { text: string; at: number }[] {
+    return this.ctx.storage.sql
+      .exec<{ text: string; at: number }>(
+        `SELECT text, at FROM recent_sends WHERE send_key = ? AND at > ?`,
+        key,
+        Date.now() - REPEAT_SEND_WINDOW_MS,
+      )
+      .toArray();
   }
 
   /**
@@ -1233,7 +1200,7 @@ export class TelegramSession extends DurableObject<Env> {
    * id rather than on the name. A name nobody can be searched for exactly (the
    * caller's own label for a contact, say) is tried again on its first word;
    * widening the query cannot reach the wrong person, because every result is
-   * still accepted only if its id is the one the draft kept.
+   * still accepted only if its id is the one the name resolved to.
    *
    * Null when none of that knows the id, which sends nothing rather than
    * reaching for a hash from an earlier request.
@@ -1264,25 +1231,27 @@ export class TelegramSession extends DurableObject<Env> {
     return new Api.InputPeerUser({ userId: id, accessHash });
   }
 
-  /** Marks the recipient known and logs the send, so the caps can see it. */
-  private recordSend(pending: PendingSend): void {
-    const key = sendKey(pending.to);
-    const userId = addressUserId(pending.to);
+  /** Marks the recipient known and logs the send, so the caps and the repeat guard can see it. */
+  private recordSend(address: string, title: string, text: string): void {
+    const key = sendKey(address);
+    const userId = addressUserId(address);
     const now = Date.now();
     const cold = this.hasSentTo(key) ? 0 : 1;
     this.ctx.storage.sql.exec(
       `INSERT INTO recipients (username, title, first_sent_at) VALUES (?, ?, ?)
        ON CONFLICT(username) DO NOTHING`,
       key,
-      pending.toLabel,
+      title,
       now,
     );
     this.ctx.storage.sql.exec(
       `INSERT INTO send_log (at, cold, chat) VALUES (?, ?, ?)`,
       now,
       cold,
-      `user:${userId ?? pending.to.replace(/^@/, "")}`,
+      `user:${userId ?? address.replace(/^@/, "")}`,
     );
+    this.ctx.storage.sql.exec(`DELETE FROM recent_sends WHERE at <= ?`, now - REPEAT_SEND_WINDOW_MS);
+    this.ctx.storage.sql.exec(`INSERT INTO recent_sends (send_key, text, at) VALUES (?, ?, ?)`, key, text, now);
   }
 
   private capVerdict(key: string): { allowed: boolean; reason: string | null } {

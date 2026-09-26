@@ -78,6 +78,50 @@ await check("a loop that answers in time makes no extra call", async () => {
   assert.equal(bodies.length, 1);
 });
 
+await check("a later request sees what an earlier one did, not just what was said", async () => {
+  // The voice transcript only holds speech. "Have you sent it?" was answered
+  // with "I still need to create the doc" because the doc's tool result was gone.
+  let firstRun = true;
+  const bodies = stubDeepSeek((body) => {
+    const last = body.messages.at(-1);
+    if (firstRun && last.role === "user") {
+      return {
+        content: null,
+        tool_calls: [
+          {
+            id: "c1",
+            function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", arguments: '{"tools":[{"tool_slug":"GOOGLEDOCS_CREATE_DOCUMENT"}]}' },
+          },
+        ],
+      };
+    }
+    firstRun = false;
+    return { content: last.role === "tool" ? "Made the doc." : "Yes, the doc is made." };
+  });
+  const harness = new ConnectorHarness(mcp, "key", "exa", "user");
+
+  await harness.run("Caller: make a doc for Himanshu", () => {});
+  const firstRequest = bodies[0].messages[1].content;
+  assert.doesNotMatch(firstRequest, /Already done earlier/);
+
+  const later = await harness.run("Caller: make a doc for Himanshu\nCaller: is it made?", () => {});
+  const secondRequest = bodies.at(-1).messages[1].content;
+  assert.match(secondRequest, /Already done earlier in this call/);
+  assert.match(secondRequest, /GOOGLEDOCS_CREATE_DOCUMENT/);
+  assert.match(secondRequest, /"id":"doc1"/);
+  assert.match(secondRequest, /Answer given: Made the doc\./);
+  assert.ok(secondRequest.indexOf("Already done") < secondRequest.indexOf("Conversation so far"));
+  assert.equal(later.text, "Yes, the doc is made.");
+});
+
+await check("the record of earlier work stays bounded, dropping the oldest first", async () => {
+  const bodies = stubDeepSeek(() => ({ content: `answer ${"x".repeat(3000)}` }));
+  const harness = new ConnectorHarness(mcp, "key", "exa", "user");
+  for (let index = 0; index < 5; index++) await harness.run(`Caller: request ${index}`, () => {});
+  const request = bodies.at(-1).messages[1].content as string;
+  assert.ok(request.length < 12000, `the request grew to ${request.length} characters`);
+});
+
 globalThis.fetch = realFetch;
 console.log(`\n${passed} passed, ${failed} failed\n`);
 if (failed) process.exitCode = 1;

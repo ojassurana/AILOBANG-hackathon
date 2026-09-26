@@ -231,8 +231,8 @@ function renderStep(status: TelegramStatus, notice: string | null): string {
         <p class="lede">${signedInAs(status)}</p>
         <p class="lede">Ask the agent to send a message to someone by name, or to read
         what has come in. A name is enough — the person does not need a public @username.
-        Nothing from before you connected is read, and every send is read back to
-        you for a yes first.</p>
+        Nothing from before you connected is read, and a message goes out as soon
+        as you ask for it.</p>
         <div class="actions">
           <form class="inline" method="post" action="/disconnect/telegram"
                 onsubmit="return confirm('Disconnect Telegram? The agent will stop being able to send and read your messages.')">

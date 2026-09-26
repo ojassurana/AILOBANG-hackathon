@@ -8,10 +8,9 @@
  * Object, with the real keys: the Composio session, the caller's Telegram
  * object and Exa. So a program can chain and loop over the caller's accounts,
  * but cannot reach anything the ordinary tools could not. The one fetch it can
- * ask for is a file Composio has already downloaded to its own storage.
- *
- * Telegram's confirm step is deliberately missing. A program can prepare a
- * message; only the model, after the caller has heard it and said yes, sends it.
+ * ask for is a file Composio has already downloaded to its own storage. A
+ * Telegram send from a program goes through the same object, and so the same
+ * caps and repeat guard, as the telegram_send tool.
  */
 
 import type { Executor, ResolvedProvider } from "@cloudflare/codemode";
@@ -77,8 +76,8 @@ export const RUN_CODE_TOOL: ToolSchema = {
       "links are signed, so one copied out of an earlier result will not work.\n" +
       "  web.search(query, numResults?) -> [{ title, url, text }].\n" +
       "  telegram.listChats(limit?), telegram.readMessages(chat, limit?), " +
-      "telegram.findContacts(name) -> arrays; telegram.prepareSend(to, text) prepares one " +
-      "message and does NOT send it.\n" +
+      "telegram.findContacts(name) -> arrays; telegram.send(to, text) sends one message now, " +
+      "to a name or @username -> { ok, reason, title, text, alreadySentAt }.\n" +
       "Each Composio call takes seconds, so never await calls one by one in a loop when they do " +
       "not depend on each other: put them in one composio.runAll. Await in sequence only when a " +
       "call needs an earlier call's result.\n" +
@@ -216,9 +215,16 @@ export class CodeToolbox {
             await connected();
             return telegram.findContacts(String(name ?? ""));
           },
-          prepareSend: async (to: unknown, text: unknown) => {
+          send: async (to: unknown, text: unknown) => {
             await connected();
-            return telegram.prepareSend(String(to ?? ""), String(text ?? ""));
+            const sent = await telegram.send(String(to ?? ""), String(text ?? ""));
+            const who = sent.title ?? String(to ?? "");
+            trace.push(
+              sent.ok
+                ? `telegram.send to ${who} ${sent.alreadySentAt !== null ? "already sent earlier" : "ok"}`
+                : `telegram.send to ${who} failed: ${(sent.reason ?? "").slice(0, 160)}`,
+            );
+            return sent;
           },
         },
       });

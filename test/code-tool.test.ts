@@ -97,7 +97,10 @@ function toolbox(options: { mcp?: McpClient; telegram?: TelegramActions | null }
   });
 }
 
-async function run(box: CodeToolbox, code: string): Promise<{ result?: any; error?: string; calls: number }> {
+async function run(
+  box: CodeToolbox,
+  code: string,
+): Promise<{ result?: any; error?: string; calls: number; trace?: string[] }> {
   return JSON.parse(await box.run(JSON.stringify({ code })));
 }
 
@@ -298,7 +301,7 @@ check("a missing or cut-off code argument is reported, not run", async () => {
 /* ---------------------------------------------------------------- telegram */
 
 function telegram(phase: TelegramStatus["phase"]) {
-  const sent: string[] = [];
+  const sent: { to: string; text: string }[] = [];
   const actions: TelegramActions = {
     async status() {
       return { phase, phone: null, username: null, error: null, retryAt: null, codeViaApp: false, hasSession: phase === "connected" };
@@ -312,26 +315,26 @@ function telegram(phase: TelegramStatus["phase"]) {
     async findContacts() {
       return [];
     },
-    async prepareSend(to, text) {
-      return { ok: true, to, title: to, text } as never;
-    },
-    async sendPending() {
-      sent.push("sent");
-      return { ok: true } as never;
+    async send(to, text) {
+      sent.push({ to, text });
+      return { ok: true, reason: null, to: null, title: to, text, alreadySentAt: null };
     },
   };
   return { actions, sent };
 }
 
-check("a program can prepare a Telegram message but has no way to send it", async () => {
+check("a program can make a link and send it on Telegram in one run", async () => {
   const { actions, sent } = telegram("connected");
+  const { mcp } = fakeMcp(() => multiExecuteReply([{ successful: true, data: { id: "doc1" } }]));
   const out = await run(
-    toolbox({ telegram: actions }),
-    `const prepared = await telegram.prepareSend("Sam", "hi");
-     return { prepared: prepared.ok, canSend: typeof telegram.sendPending, canConfirm: typeof telegram.confirmSend };`,
+    toolbox({ mcp, telegram: actions }),
+    `const doc = await composio.run("GOOGLEDOCS_CREATE_DOCUMENT", { title: "Notes" });
+     const message = await telegram.send("Himanshu", "Here's the doc: " + doc.id);
+     return { sent: message.ok };`,
   );
-  assert.deepEqual(out.result, { prepared: true, canSend: "undefined", canConfirm: "undefined" });
-  assert.equal(sent.length, 0);
+  assert.deepEqual(out.result, { sent: true });
+  assert.deepEqual(sent, [{ to: "Himanshu", text: "Here's the doc: doc1" }]);
+  assert.ok(out.trace?.includes("telegram.send to Himanshu ok"));
 });
 
 check("an unconnected Telegram is an error, not an empty inbox", async () => {
@@ -345,10 +348,10 @@ check("an unconnected Telegram is an error, not an empty inbox", async () => {
 check("the tool is described for the model with every function a program can call", () => {
   assert.equal(RUN_CODE_TOOL.function.name, RUN_CODE);
   const description = RUN_CODE_TOOL.function.description ?? "";
-  for (const fn of ["composio.run", "composio.runAll", "composio.search", "composio.schemas", "composio.readFile", "web.search", "telegram.prepareSend"]) {
+  for (const fn of ["composio.run", "composio.runAll", "composio.search", "composio.schemas", "composio.readFile", "web.search", "telegram.send"]) {
     assert.ok(description.includes(fn), `the description never mentions ${fn}`);
   }
-  assert.match(description, /does NOT send/);
+  assert.doesNotMatch(description, /prepareSend/);
 });
 
 check("the harness prompt tells the model when to reach for run_code", async () => {

@@ -419,31 +419,35 @@ export function checkSendCaps(input: {
   return { allowed: true, reason: null, retryAt: null };
 }
 
-/* --------------------------------------------------------- pending confirmation */
+/* ---------------------------------------------------------------- repeat sends */
 
 /**
- * The one message waiting for a yes.
+ * How long the same text to the same person counts as already sent.
  *
- * Exactly one, and it expires, because the caller's confirmation arrives as a
- * second request that can only see the conversation — not an identifier we
- * returned. A single stored draft with a short life is what makes "send it" mean
- * the thing that was last read back, and nothing older.
+ * A send goes out on the first request, and a voice call can ask for the same
+ * thing again — the caller repeats "send it", or asks whether it went — with
+ * every request re-reading the whole conversation. Within this window a repeat
+ * is answered as done rather than sent a second time.
  */
-export const PENDING_SEND_TTL_MS = 120 * 1000;
+export const REPEAT_SEND_WINDOW_MS = 15 * 60 * 1000;
 
-export interface PendingSend {
-  /**
-   * The address the message goes to: the @handle when the account has one, or
-   * `id:<userId>` when it does not. Never an access hash — a send resolves that
-   * for itself, because a stored one addresses whoever it points at now.
-   */
-  to: string;
-  /** The resolved display name, for reading the message back. */
-  toLabel: string;
-  text: string;
-  preparedAt: number;
+/** When an identical message last went to this person within the window, or null. */
+export function repeatSentAt(
+  previous: readonly { text: string; at: number }[],
+  text: string,
+  now: number,
+): number | null {
+  const wanted = sameText(text);
+  let latest: number | null = null;
+  for (const sent of previous) {
+    if (now - sent.at >= REPEAT_SEND_WINDOW_MS) continue;
+    if (sameText(sent.text) !== wanted) continue;
+    if (latest === null || sent.at > latest) latest = sent.at;
+  }
+  return latest;
 }
 
-export function pendingSendExpired(pending: PendingSend | null, now: number): boolean {
-  return !pending || now - pending.preparedAt > PENDING_SEND_TTL_MS;
+/** Spacing and case are where a model's retelling of one message drifts. */
+function sameText(text: string): string {
+  return text.trim().replace(/\s+/g, " ").toLowerCase();
 }

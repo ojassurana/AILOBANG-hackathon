@@ -12,7 +12,7 @@
 
 import assert from "node:assert/strict";
 import { TELEGRAM_TOOLS, TelegramToolbox, isTelegramTool, type TelegramActions } from "../src/telegram-tools";
-import type { ChatSummary, MessageLine, PrepareResult, SendResult, TelegramStatus } from "../src/telegram";
+import type { ChatSummary, MessageLine, SendResult, TelegramStatus } from "../src/telegram";
 import type { ContactCandidate } from "../src/telegram-contacts";
 
 let passed = 0;
@@ -53,8 +53,7 @@ interface Recorded {
   listChats: number[];
   readMessages: { chat: string; limit: number | undefined }[];
   lookups: string[];
-  prepared: { to: string; text: string }[];
-  sends: number;
+  sends: { to: string; text: string }[];
 }
 
 function fake(options: {
@@ -62,10 +61,9 @@ function fake(options: {
   chats?: ChatSummary[];
   messages?: MessageLine[];
   contacts?: ContactCandidate[];
-  prepare?: Partial<PrepareResult>;
   send?: Partial<SendResult>;
 } = {}) {
-  const recorded: Recorded = { listChats: [], readMessages: [], lookups: [], prepared: [], sends: 0 };
+  const recorded: Recorded = { listChats: [], readMessages: [], lookups: [], sends: [] };
 
   const telegram: TelegramActions = {
     async status() {
@@ -83,20 +81,17 @@ function fake(options: {
       recorded.lookups.push(name);
       return options.contacts ?? [];
     },
-    async prepareSend(to: string, text: string) {
-      recorded.prepared.push({ to, text });
+    async send(to: string, text: string) {
+      recorded.sends.push({ to, text });
       return {
         ok: true,
         reason: null,
-        to: to.startsWith("@") ? to : `@${to}`,
+        to: "@himanshu",
         title: "Himanshu",
         text,
-        ...options.prepare,
+        alreadySentAt: null,
+        ...options.send,
       };
-    },
-    async sendPending() {
-      recorded.sends += 1;
-      return { ok: true, reason: null, to: "@himanshu", title: "Himanshu", ...options.send };
     },
   };
 
@@ -113,8 +108,7 @@ check("every tool refuses to act without a connection, and says so", async () =>
       assert.match(answer, /Telegram isn't connected|isn't usable right now/);
     }
     // Nothing reached the object: the refusal is decided before any read.
-    assert.deepEqual(recorded.prepared, []);
-    assert.equal(recorded.sends, 0);
+    assert.deepEqual(recorded.sends, []);
     assert.deepEqual(recorded.listChats, []);
     assert.deepEqual(recorded.lookups, []);
   }
@@ -207,7 +201,7 @@ check("one match names the handle to send to, rather than guessing", async () =>
   const answer = await toolbox.run("telegram_find_contact", '{"name":"Chacha"}');
   assert.match(answer, /One person matches "Chacha"/);
   assert.match(answer, /Rahul Chacha \(@rahulchacha\)/);
-  assert.match(answer, /Send to @rahulchacha/);
+  assert.match(answer, /telegram_send with @rahulchacha reaches them/);
   // The name is looked up as the caller said it, not tidied into a handle first.
   assert.deepEqual(recorded.lookups, ["Chacha"]);
 });
@@ -237,21 +231,21 @@ check("a match with no handle is offered as a send, not as a wall", async () => 
   const answer = await toolbox.run("telegram_find_contact", '{"name":"Chacha"}');
   assert.match(answer, /One person matches "Chacha"/);
   assert.match(answer, /Chacha — no @username/);
-  assert.match(answer, /Send to Chacha by name — an @username is not needed/);
+  assert.match(answer, /telegram_send with the name Chacha reaches them — an @username is not needed/);
   assert.doesNotMatch(answer, /cannot be messaged|needs a handle/);
 });
 
 check("nothing the model is shown says a handle is required", () => {
   // The caller heard "Telegram needs a handle" three times, so the wording that
   // could produce it is pinned here rather than left to drift.
-  const prepare = TELEGRAM_TOOLS.find((tool) => tool.function.name === "telegram_prepare_send");
+  const send = TELEGRAM_TOOLS.find((tool) => tool.function.name === "telegram_send");
   const find = TELEGRAM_TOOLS.find((tool) => tool.function.name === "telegram_find_contact");
-  for (const tool of [prepare, find]) {
+  for (const tool of [send, find]) {
     const shown = `${tool?.function.description ?? ""} ${JSON.stringify(tool?.function.parameters ?? {})}`;
     assert.match(shown, /no @username/);
     assert.doesNotMatch(shown, /needs a handle|cannot be messaged/);
   }
-  assert.match(prepare?.function.description ?? "", /a name is enough/);
+  assert.match(send?.function.description ?? "", /a name is enough/);
 });
 
 check("a match says where it was found, so a stranger is not read as a friend", async () => {
@@ -266,103 +260,72 @@ check("finding needs a name to look up", async () => {
   assert.deepEqual(recorded.lookups, []);
 });
 
-check("a resolved name is what gets read back before anything is sent", async () => {
-  const { toolbox, recorded } = fake({
-    prepare: { ok: true, reason: null, to: "@rahulchacha", title: "Rahul Chacha", text: "On my way" },
-  });
-  const answer = await toolbox.run("telegram_prepare_send", '{"to":"Chacha","text":"On my way"}');
-  assert.match(answer, /To: Rahul Chacha \(@rahulchacha\)/);
-  // The name went through as spoken; resolving it is the object's job, not the
-  // tool's, so the handle in the answer is the one that will be sent to.
-  assert.deepEqual(recorded.prepared, [{ to: "Chacha", text: "On my way" }]);
-  assert.equal(recorded.sends, 0);
+/* ------------------------------------------------------------------ sending */
+
+check("one call sends the message and says who it went to", async () => {
+  const { toolbox, recorded } = fake();
+  const answer = await toolbox.run(
+    "telegram_send",
+    '{"to":"Himanshu","text":"It is time to collect the chair."}',
+  );
+  assert.equal(answer, 'Sent to Himanshu (@himanshu): "It is time to collect the chair.".');
+  // The name went through as spoken; resolving it is the object's job, not the tool's.
+  assert.deepEqual(recorded.sends, [{ to: "Himanshu", text: "It is time to collect the chair." }]);
+  assert.doesNotMatch(answer, /confirm|say yes|NOT sent/i);
 });
 
-check("a message to someone with no handle is read back by name", async () => {
-  const { toolbox } = fake({
-    prepare: { ok: true, reason: null, to: null, title: "Himanshu Sharma", text: "On my way" },
-  });
-  const answer = await toolbox.run("telegram_prepare_send", '{"to":"Himanshu","text":"On my way"}');
-  assert.match(answer, /To: Himanshu Sharma\./);
+check("a send with no handle is reported by name, never by an id", async () => {
+  const { toolbox } = fake({ send: { to: null, title: "Himanshu Sharma" } });
+  const answer = await toolbox.run("telegram_send", '{"to":"Himanshu","text":"On my way"}');
+  assert.equal(answer, 'Sent to Himanshu Sharma: "On my way".');
   assert.doesNotMatch(answer, /null|no @username/);
+});
+
+check("a repeat of a message just sent is reported as done, not as a new send", async () => {
+  const at = Date.UTC(2026, 8, 26, 16, 0, 0);
+  const { toolbox } = fake({ send: { alreadySentAt: at } });
+  const answer = await toolbox.run("telegram_send", '{"to":"Himanshu","text":"On my way"}');
+  assert.match(answer, /^Already sent to Himanshu \(@himanshu\) at 2026-09-26T16:00:00\.000Z/);
+  assert.match(answer, /It was not sent again/);
 });
 
 check("a refusal naming several people reaches the model with the candidates intact", async () => {
   // What produces this string — one match or none, never a choice between two —
   // is pinned in telegram-contacts.test.ts, where the rule lives. What matters
-  // here is that the sentence and the candidates survive the tool boundary, and
-  // that a refused preparation sends nothing.
-  const { toolbox, recorded } = fake({
-    prepare: {
+  // here is that the sentence and the candidates survive the tool boundary.
+  const { toolbox } = fake({
+    send: {
       ok: false,
       reason:
         "chacha could be 2 people: Rahul Chacha (@rahulchacha), Priya Chacha (@priyachacha). " +
-        "Ask the caller which one they mean, then prepare the message again naming that person.",
+        "Ask the caller which one they mean, then send it again naming that person.",
       to: null,
       title: null,
       text: null,
     },
   });
-  const answer = await toolbox.run("telegram_prepare_send", '{"to":"chacha","text":"hi"}');
+  const answer = await toolbox.run("telegram_send", '{"to":"chacha","text":"hi"}');
   assert.match(answer, /could be 2 people/);
   assert.match(answer, /@rahulchacha/);
   assert.match(answer, /@priyachacha/);
   assert.match(answer, /Ask the caller which one they mean/);
-  assert.equal(recorded.sends, 0);
+  assert.doesNotMatch(answer, /^Sent/);
 });
 
-/* ------------------------------------------------------------------ sending */
-
-check("preparing a message sends nothing and asks for a confirmation", async () => {
+check("sending needs both a recipient and the text", async () => {
   const { toolbox, recorded } = fake();
-  const answer = await toolbox.run(
-    "telegram_prepare_send",
-    '{"to":"@himanshu","text":"It is time to collect the chair."}',
-  );
-  assert.match(answer, /Prepared, and NOT sent yet/);
-  assert.match(answer, /It is time to collect the chair\./);
-  assert.match(answer, /Call telegram_confirm_send only after they say yes/);
-  assert.deepEqual(recorded.prepared, [{ to: "@himanshu", text: "It is time to collect the chair." }]);
-  assert.equal(recorded.sends, 0);
-});
-
-check("preparing needs both a recipient and the text", async () => {
-  const { toolbox, recorded } = fake();
-  assert.match(await toolbox.run("telegram_prepare_send", '{"text":"hi"}'), /who to send to/);
-  assert.match(await toolbox.run("telegram_prepare_send", '{"to":"@himanshu"}'), /exact message text/);
-  assert.match(await toolbox.run("telegram_prepare_send", "{}"), /who to send to/);
-  assert.deepEqual(recorded.prepared, []);
-});
-
-check("a refused preparation passes the reason through unchanged", async () => {
-  const { toolbox, recorded } = fake({
-    prepare: { ok: false, reason: "Telegram is asking us to slow down. Try again in a minute.", to: null, title: null, text: null },
-  });
-  const answer = await toolbox.run("telegram_prepare_send", '{"to":"@himanshu","text":"hi"}');
-  assert.equal(answer, "Telegram is asking us to slow down. Try again in a minute.");
-  assert.equal(recorded.sends, 0);
-});
-
-check("confirming sends exactly the prepared message and reports who it went to", async () => {
-  const { toolbox, recorded } = fake();
-  const answer = await toolbox.run("telegram_confirm_send", "{}");
-  assert.equal(answer, "Sent to Himanshu (@himanshu).");
-  assert.equal(recorded.sends, 1);
-});
-
-check("a send with no handle is reported by name, never by an id", async () => {
-  const { toolbox } = fake({ send: { ok: true, reason: null, to: null, title: "Himanshu Sharma" } });
-  const answer = await toolbox.run("telegram_confirm_send", "{}");
-  assert.equal(answer, "Sent to Himanshu Sharma.");
+  assert.match(await toolbox.run("telegram_send", '{"text":"hi"}'), /who to send to/);
+  assert.match(await toolbox.run("telegram_send", '{"to":"@himanshu"}'), /exact message text/);
+  assert.match(await toolbox.run("telegram_send", "{}"), /who to send to/);
+  assert.deepEqual(recorded.sends, []);
 });
 
 check("a send that did not happen is never reported as sent", async () => {
   const { toolbox } = fake({
-    send: { ok: false, reason: "That message is no longer waiting to go — ask me to send it again." },
+    send: { ok: false, reason: "Telegram is asking us to slow down. Try again in a minute." },
   });
-  const answer = await toolbox.run("telegram_confirm_send", "{}");
-  assert.equal(answer, "That message is no longer waiting to go — ask me to send it again.");
-  assert.doesNotMatch(answer, /^Sent/);
+  const answer = await toolbox.run("telegram_send", '{"to":"@himanshu","text":"hi"}');
+  assert.equal(answer, "Telegram is asking us to slow down. Try again in a minute.");
 });
 
 /* ------------------------------------------------------------------- schema */
@@ -373,8 +336,7 @@ check("every tool is named and described for the model that has to choose it", (
     "telegram_list_chats",
     "telegram_read_messages",
     "telegram_find_contact",
-    "telegram_prepare_send",
-    "telegram_confirm_send",
+    "telegram_send",
   ]);
   for (const tool of TELEGRAM_TOOLS) {
     assert.ok((tool.function.description ?? "").length > 80, `${tool.function.name} needs a description`);
@@ -388,9 +350,10 @@ check("the harness prompt tells the model how to use each tool it is given", asy
   for (const tool of TELEGRAM_TOOLS) {
     assert.ok(SYSTEM_PROMPT.includes(tool.function.name), `the prompt never mentions ${tool.function.name}`);
   }
-  // The two-step send is the part a model gets wrong by sending on the first call.
-  assert.match(SYSTEM_PROMPT, /both are required/);
-  assert.match(SYSTEM_PROMPT, /only after they say yes/i);
+  // The caller had to say "send it" four times; the prompt must not ask for a yes.
+  assert.match(SYSTEM_PROMPT, /asking is the go-ahead/i);
+  assert.match(SYSTEM_PROMPT, /do not ask the caller to confirm/i);
+  assert.doesNotMatch(SYSTEM_PROMPT, /prepare_send|confirm_send|only after they say yes/i);
 });
 
 await Promise.all(checks);
