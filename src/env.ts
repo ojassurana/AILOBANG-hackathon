@@ -30,4 +30,12 @@ export interface Env extends Cloudflare.Env {
   PLAID_SECRET: string;
   /** 32 random bytes, base64: the key the stored Plaid access tokens are sealed under. */
   PLAID_TOKEN_KEY: string;
+  /**
+   * MongoDB Atlas, where long-term memory lives: a `mongodb+srv://` string for
+   * a user with readWrite on the `ailobang` database. Unset means no memory —
+   * the agents run as they did before it existed.
+   */
+  MONGODB_URI: string;
+  /** OpenRouter: Jev (the memory router) and the model that writes memory run through it. */
+  OPENROUTER_API_KEY: string;
 }

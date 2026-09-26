@@ -17,6 +17,7 @@ import { CODE_GUIDANCE, CodeToolbox, RUN_CODE, RUN_CODE_TOOL } from "./code-tool
 import { chatWithTools, type ChatMessage, type ToolSchema } from "./deepseek";
 import { webSearch } from "./exa";
 import type { McpClient, McpTool } from "./mcp";
+import { MEMORY_GUIDANCE, MEMORY_TOOL, MemoryToolbox, type MemoryActions } from "./memory/tool";
 import type { PlaidActions } from "./plaid";
 import { PlaidToolbox, plaidTools } from "./plaid-tools";
 import { TELEGRAM_TOOLS, TelegramToolbox, type TelegramActions } from "./telegram-tools";
@@ -135,6 +136,8 @@ has not connected the account a request needs, say so plainly.
 
 ${CODE_GUIDANCE}
 
+${MEMORY_GUIDANCE}
+
 ## Return the result
 Answer in at most 60 words of plain conversational text, with no markdown, no
 lists and no URLs: it is read aloud by a voice model. Lead with the answer.
@@ -158,6 +161,7 @@ const PROGRESS_NOTES: Record<string, string> = {
   plaid_list_accounts: "Checking your bank balances.",
   plaid_transactions: "Looking through your transactions.",
   [RUN_CODE]: "Working through that now.",
+  [MEMORY_TOOL.function.name]: "Checking what I remember.",
 };
 
 /** Built in rather than exposed as a connector: the harness owns this capability. */
@@ -194,6 +198,8 @@ export class ConnectorHarness {
   private readonly telegram: TelegramToolbox | null;
   private readonly code: CodeToolbox | null;
   private readonly plaid: PlaidToolbox;
+  /** Null when this user has no memory object (no Atlas configured). */
+  private readonly memory: MemoryToolbox | null;
   /**
    * What each earlier run on this harness did, one block per request.
    *
@@ -211,9 +217,11 @@ export class ConnectorHarness {
     telegram: TelegramActions | null = null,
     executor: Executor | null = null,
     plaid: PlaidActions | null = null,
+    memory: MemoryActions | null = null,
   ) {
     this.telegram = telegram ? new TelegramToolbox(telegram) : null;
     this.plaid = new PlaidToolbox(plaid);
+    this.memory = memory ? new MemoryToolbox(memory) : null;
     this.code = executor
       ? new CodeToolbox({
           executor,
@@ -244,11 +252,18 @@ export class ConnectorHarness {
       ...plaidTools(),
       WEB_SEARCH_TOOL,
       ...(this.code ? [RUN_CODE_TOOL] : []),
+      ...(this.memory ? [MEMORY_TOOL] : []),
     ];
+
+    // Jev walks the memory tree for the latest request before the model
+    // starts, so a name, a preference or a saved procedure is already in
+    // front of it rather than a lookup it has to think to make.
+    const remembered = this.memory ? await this.memory.recall(latestRequest(transcript), transcript) : "";
+    if (remembered) onProgress("Checking what I remember.");
 
     const messages: ChatMessage[] = [
       { role: "system", content: options?.system ?? SYSTEM_PROMPT },
-      { role: "user", content: requestContent(transcript, this.worklog) },
+      { role: "user", content: requestContent(transcript, this.worklog, remembered) },
     ];
     const maxAnswer = options?.maxAnswerChars ?? MAX_ANSWER_CHARS;
 
@@ -312,6 +327,8 @@ export class ConnectorHarness {
             output = await this.telegram.run(call.name, call.arguments);
           } else if (this.plaid.handles(call.name)) {
             output = await this.plaid.run(call.name, call.arguments);
+          } else if (this.memory?.handles(call.name)) {
+            output = await this.memory.run(call.arguments);
           } else {
             output = await this.mcpCall(call.name, call.arguments);
           }
@@ -342,6 +359,16 @@ export class ConnectorHarness {
     }
 
     return answer;
+  }
+
+  /** The most recent run's record — what the memory pass reads to keep a workflow. */
+  lastWork(): string | null {
+    return this.worklog.length ? this.worklog[this.worklog.length - 1] : null;
+  }
+
+  /** Every run so far on this harness, oldest first: the call's whole work record. */
+  allWork(): string | null {
+    return this.worklog.length ? this.worklog.join("\n") : null;
   }
 
   /** Adds one run to the worklog, keeping the newest requests within the cap. */
@@ -379,14 +406,32 @@ export class ConnectorHarness {
   }
 }
 
-/** The run's opening message: the earlier work, when there is any, then the conversation. */
-function requestContent(transcript: string, worklog: readonly string[]): string {
+/**
+ * The run's opening message: what memory holds, the earlier work, when there
+ * is any, then the conversation.
+ */
+function requestContent(transcript: string, worklog: readonly string[], remembered = ""): string {
   const conversation = `Conversation so far (act on the caller's latest request):\n${transcript}`;
-  if (!worklog.length) return conversation;
-  return (
-    "Already done earlier in this call. These are real tool results, so do not redo any of it:\n" +
-    `${worklog.join("\n")}\n\n${conversation}`
-  );
+  const parts: string[] = [];
+  if (remembered) parts.push(remembered);
+  if (worklog.length) {
+    parts.push(
+      "Already done earlier in this call. These are real tool results, so do not redo any of it:\n" +
+        worklog.join("\n"),
+    );
+  }
+  parts.push(conversation);
+  return parts.join("\n\n");
+}
+
+/** The caller's most recent line: what the memory read is about. */
+export function latestRequest(transcript: string): string {
+  const lines = transcript.split("\n");
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index];
+    if (/^(caller|user):/i.test(line)) return line.replace(/^(caller|user):\s*/i, "").trim();
+  }
+  return lines[lines.length - 1]?.replace(/^\w+:\s*/, "").trim() ?? "";
 }
 
 /** MCP tools describe arguments with JSON Schema, which is what the model wants. */

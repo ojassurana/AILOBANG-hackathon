@@ -65,12 +65,14 @@ import {
   userForPhone,
   type PhoneLink,
 } from "./phone";
+import { memoryJson, renderMemoryPage } from "./memory/memory-page";
 import { renderPhonePage } from "./phone-page";
 import { callWidget } from "./call-widget";
 import { getAgentByName, routeAgentRequest } from "agents";
 
 export { VoiceAgent } from "./voice-agent";
 export { CodingAgent } from "./coding-agent";
+export { MemoryStore } from "./memory/memory-store";
 // Migrated classes are only resolvable if the Worker entry actually exports them.
 export { TelegramSession } from "./telegram";
 
@@ -213,6 +215,10 @@ async function route(request: Request, env: Env): Promise<Response> {
       return plaidScreen(request, env);
     case "/call":
       return callPage(request, env);
+    case "/memory":
+      return memoryPage(request, env);
+    case "/memory.json":
+      return memoryData(request, env);
     case "/phone":
       return phoneScreen(request, env);
     case "/phone/skip":
@@ -417,6 +423,45 @@ async function callPage(request: Request, env: Env): Promise<Response> {
     }),
     { headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" } },
   );
+}
+
+/* ----------------------------------------------------------------- memory */
+
+/** The memory page: the tree the agent built for this user, and the decisions behind it. */
+async function memoryPage(request: Request, env: Env): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  let connected = false;
+  let error: string | null = null;
+  if (!env.MONGODB_URI) {
+    error = "Long-term memory is not configured on this deployment (no MONGODB_URI).";
+  } else {
+    const ping = await env.MEMORY_STORE.get(env.MEMORY_STORE.idFromName(session.sub)).ping();
+    connected = ping.ok;
+    if (!ping.ok) error = `MongoDB Atlas could not be reached: ${ping.error ?? "unknown error"}`;
+  }
+
+  return new Response(renderMemoryPage({ email: session.email, connected, error }), {
+    headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/** The tree and recent events as JSON, for the memory page's polling. */
+async function memoryData(request: Request, env: Env): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+  if (!env.MONGODB_URI) return Response.json({ nodes: [], events: [] });
+
+  try {
+    const snapshot = await env.MEMORY_STORE.get(env.MEMORY_STORE.idFromName(session.sub)).snapshot();
+    return new Response(memoryJson(snapshot), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  } catch (error) {
+    console.error("memory snapshot failed", error);
+    return Response.json({ error: "memory unavailable" }, { status: 503 });
+  }
 }
 
 /* ------------------------------------------------------------------ phone */
@@ -1418,7 +1463,7 @@ function renderConnectionsPage(
           <h1>Connect your accounts</h1>
           <p class="sub">Anything you connect, your agent can look up mid-call.</p>
         </div>
-        <div class="who">${escapeHtml(session.email)}<br /><a href="/auth/logout">Log out</a></div>
+        <div class="who">${escapeHtml(session.email)}<br /><a href="/memory">Memory</a> · <a href="/auth/logout">Log out</a></div>
       </div>
 ${banner}
       <div class="cols">
@@ -1439,6 +1484,7 @@ ${phonePanel(phone, callNumber)}
               <li>Read and send your email</li>
               <li>Check your calendar and files</li>
               <li>Bank balances and transactions</li>
+              <li>It remembers: <a href="/memory">see what it has learned</a></li>
             </ul>
           </div>
         </aside>

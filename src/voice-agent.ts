@@ -27,6 +27,7 @@ import { DelegationQueue } from "./delegation-queue";
 import type { Env } from "./env";
 import { ConnectorHarness } from "./harness";
 import { McpClient } from "./mcp";
+import type { MemoryStore } from "./memory/memory-store";
 import { PlaidBanks, plaidConfig } from "./plaid";
 
 /**
@@ -47,6 +48,8 @@ const CLOSE_TIMEOUT_MS = 15000;
 const RECONNECT_GRACE_MS = 60000;
 /** How long a session may take to report itself started before the call gives up. */
 const START_TIMEOUT_MS = 8000;
+/** How long the call start waits on long-term memory before going ahead without it. */
+const BRIEF_TIMEOUT_MS = 1500;
 /**
  * How many routed requests may wait behind the one being answered.
  *
@@ -89,6 +92,8 @@ export class VoiceAgent extends Agent<Env> {
    * it up, and closing a tab doesn't end it.
    */
   private phoneSessionId: string | null = null;
+  /** When this call began, for the record that is kept of it. */
+  private callStartedAt: string | null = null;
 
   /** Call-page sockets. The live-call widget's sockets only watch, and don't count. */
   private connectionCount(): number {
@@ -207,7 +212,7 @@ export class VoiceAgent extends Agent<Env> {
       }
     }
 
-    const socket = await this.connectLive(LIVE_SOCKET_URL);
+    const [socket, brief] = await Promise.all([this.connectLive(LIVE_SOCKET_URL), this.memoryBrief()]);
     this.bindLive(socket);
 
     this.sendLive({
@@ -215,7 +220,7 @@ export class VoiceAgent extends Agent<Env> {
       event_id: `start_${Date.now()}`,
       session: {
         model: LIVE_MODEL,
-        instructions: conversationPrompt("site"),
+        instructions: conversationPrompt("site", brief),
         audio: { format: { type: "audio/pcm", rate: SAMPLE_RATE }, output: { voice: VOICE } },
         delegation: { type: "client" },
         store: false,
@@ -249,11 +254,12 @@ export class VoiceAgent extends Agent<Env> {
       return "busy";
     }
 
+    const brief = await this.memoryBrief();
     const accepted = await this.liveCallAction(sessionId, "accept", {
       session: {
         type: "live",
         model: LIVE_MODEL,
-        instructions: conversationPrompt("phone"),
+        instructions: conversationPrompt("phone", brief),
         audio: { output: { voice: VOICE } },
         delegation: { type: "client" },
         store: false,
@@ -331,6 +337,7 @@ export class VoiceAgent extends Agent<Env> {
     this.live = socket;
     this.greeted = false;
     this.transcript = [];
+    this.callStartedAt = new Date().toISOString();
   }
 
   private closeLiveSession(reason: string): void {
@@ -351,10 +358,66 @@ export class VoiceAgent extends Agent<Env> {
       JSON.stringify({ reason, callerStillHere, phone: this.phoneSessionId !== null }),
     );
     this.notify({ type: "call", state: "ended", reason });
+    // The call is over: what it leaves in long-term memory is decided now, off
+    // the call's path, from the whole conversation and everything the tools did.
+    this.keepMemory("call", this.harness?.allWork() ?? null, true);
     this.live = null;
     this.liveReady = false;
     this.harness = null;
     this.phoneSessionId = null;
+  }
+
+  /* ---------------------------------------------------------------- memory */
+
+  /** This user's memory object, or null when no Atlas is configured. */
+  private memory(): DurableObjectStub<MemoryStore> | null {
+    if (!this.env.MONGODB_URI) return null;
+    return this.env.MEMORY_STORE.get(this.env.MEMORY_STORE.idFromName(this.name));
+  }
+
+  /**
+   * What long-term memory says about the caller, for the session's
+   * instructions. Bounded: a call must start whether or not Atlas answers.
+   */
+  private async memoryBrief(): Promise<string> {
+    const memory = this.memory();
+    if (!memory) return "";
+    try {
+      const brief = await Promise.race([
+        memory.brief(),
+        new Promise<string>((resolve) => setTimeout(() => resolve(""), BRIEF_TIMEOUT_MS)),
+      ]);
+      return brief;
+    } catch (error) {
+      console.error("voice agent: memory brief failed", error);
+      return "";
+    }
+  }
+
+  /**
+   * Hands the conversation so far to the memory object, which decides with Jev
+   * whether anything is worth keeping and writes it. Runs in the background.
+   */
+  private keepMemory(source: "call" | "delegation", work: string | null, saveCall = false): void {
+    const memory = this.memory();
+    const conversation = this.transcriptText();
+    if (!memory || !conversation) return;
+    const startedAt = this.callStartedAt;
+
+    this.ctx.waitUntil(
+      (async () => {
+        try {
+          if (saveCall) {
+            await memory.saveCall({ source, transcript: conversation, work, startedAt, endedAt: new Date().toISOString() });
+          }
+          const result = await memory.consolidate({ source, conversation, work });
+          console.log("voice agent: memory", JSON.stringify({ source, ...result }));
+          if (result.applied.length) this.notify({ type: "memory", applied: result.applied, route: result.route });
+        } catch (error) {
+          console.error("voice agent: memory pass failed", error);
+        }
+      })(),
+    );
   }
 
   /**
@@ -534,6 +597,9 @@ export class VoiceAgent extends Agent<Env> {
         content: result.text,
       });
       this.notify({ type: "working", note: null });
+      // A job just done with tools is the moment a workflow is worth keeping:
+      // the program that ran and the slugs it used are all in this run's record.
+      if (result.steps.length) this.keepMemory("delegation", harness.lastWork());
     } catch (error) {
       console.error("voice agent: harness failed", error);
       this.notify({ type: "error", message: "The connector lookup failed." });
@@ -556,6 +622,7 @@ export class VoiceAgent extends Agent<Env> {
       this.env.TELEGRAM_SESSION.get(this.env.TELEGRAM_SESSION.idFromName(this.name)),
       new DynamicWorkerExecutor({ loader: this.env.LOADER, timeout: CODE_TIMEOUT_MS }),
       plaid ? new PlaidBanks(plaid, this.env.DB, this.name) : null,
+      this.memory(),
     );
     await harness.warmUp();
 
@@ -602,13 +669,22 @@ export class VoiceAgent extends Agent<Env> {
   }
 }
 
-function conversationPrompt(channel: "site" | "phone"): string {
+function conversationPrompt(channel: "site" | "phone", brief = ""): string {
   const opening =
     channel === "phone"
       ? "You are Ailobang's voice assistant, on a phone call with someone who dialled in from the number linked to their account, which has some of their accounts connected."
       : "You are Ailobang's voice assistant, talking with someone who is signed in and has connected some of their accounts.";
 
+  const memory = brief
+    ? `What you already know about the caller, from long-term memory built up over earlier calls. It is true unless they correct it; use it naturally and never ask for what is already here:
+${brief}
+
+The backend keeps this memory. When the caller tells you to remember or forget something, delegate so it is saved; memory also updates itself after each call, so do not announce that you are memorising things.`
+    : "You have no long-term memory of this caller yet. The backend will start building one from this call; when the caller tells you to remember something, delegate so it is saved.";
+
   return `${opening}
+
+${memory}
 
 Tone: warm, brief, natural. Most replies are one or two sentences. Never read out markdown, lists or URLs.
 
@@ -628,7 +704,7 @@ Delegate to the backend when:
 - a correction changes work already requested;
 - the answer needs a lookup or careful reasoning.
 
-Never answer a question about current events or the caller's own data from memory — the backend has the live sources and you do not.
+Never answer a question about current events or the caller's live account data from your own knowledge — the backend has the live sources and you do not. What is written above under long-term memory is different: that is known, and you may use it.
 
 Do not delegate for greetings, thanks, small talk, or anything you can already answer from the conversation.
 

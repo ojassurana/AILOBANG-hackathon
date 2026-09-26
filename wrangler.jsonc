@@ -35,6 +35,12 @@
       {
         "name": "CODING_AGENT",
         "class_name": "CodingAgent"
+      },
+      {
+        // One per user: holds the MongoDB Atlas connection and is the single
+        // writer of that user's long-term memory tree.
+        "name": "MEMORY_STORE",
+        "class_name": "MemoryStore"
       }
     ]
   },
@@ -50,6 +56,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["CodingAgent"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["MemoryStore"]
     }
   ],
   "vars": {

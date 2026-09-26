@@ -12,6 +12,8 @@ import { createToolRouterSession } from "./composio";
 import type { Env } from "./env";
 import { BANK_GUIDANCE, ConnectorHarness } from "./harness";
 import { McpClient } from "./mcp";
+import type { MemoryStore } from "./memory/memory-store";
+import { MEMORY_GUIDANCE } from "./memory/tool";
 import { PlaidBanks, plaidConfig } from "./plaid";
 
 const SITE_ORIGIN = "https://ailobang.com";
@@ -61,6 +63,8 @@ Never invent a tool slug. If the needed account is not connected, say so.
 
 ${CODE_GUIDANCE}
 
+${MEMORY_GUIDANCE}
+
 ## Return
 Lead with the answer. Use code blocks for code. Report only what tools confirmed.`;
 
@@ -91,7 +95,25 @@ export class CodingAgent extends AIChatAgent<Env> {
       maxAnswerChars: 8000,
     });
 
+    // Same memory as the voice call: what this chat taught about the user or
+    // about doing a job is decided by Jev and written in the background.
+    const memory = this.memory();
+    if (memory) {
+      const conversation = `${transcript}\nassistant: ${result.text}`;
+      this.ctx.waitUntil(
+        memory
+          .consolidate({ source: "chat", conversation, work: harness.lastWork() })
+          .then((outcome) => console.log("coding agent: memory", JSON.stringify(outcome)))
+          .catch((error) => console.error("coding agent: memory pass failed", error)),
+      );
+    }
+
     return new Response(result.text, { headers: { "Content-Type": "text/plain;charset=utf-8" } });
+  }
+
+  private memory(): DurableObjectStub<MemoryStore> | null {
+    if (!this.env.MONGODB_URI) return null;
+    return this.env.MEMORY_STORE.get(this.env.MEMORY_STORE.idFromName(this.name));
   }
 
   private async getHarness(): Promise<ConnectorHarness> {
@@ -107,6 +129,7 @@ export class CodingAgent extends AIChatAgent<Env> {
       this.env.TELEGRAM_SESSION.get(this.env.TELEGRAM_SESSION.idFromName(this.name)),
       new DynamicWorkerExecutor({ loader: this.env.LOADER, timeout: CODE_TIMEOUT_MS }),
       plaid ? new PlaidBanks(plaid, this.env.DB, this.name) : null,
+      this.memory(),
     );
     await harness.warmUp();
     this.harness = harness;
