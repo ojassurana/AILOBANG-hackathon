@@ -16,8 +16,10 @@ import {
 import {
   createConnectLink,
   deleteConnectedAccount,
+  fetchTestEndpoint,
   listAccountIds,
   listConnectedAccounts,
+  resolveAccountIdentity,
   type ConnectedAccount,
 } from "./composio";
 
@@ -264,16 +266,73 @@ async function appPage(request: Request, env: Env): Promise<Response> {
     warning = "We couldn't reach the connector service. Refresh to try again.";
   }
 
+  if (!warning) await resolveMissingLabels(env, accounts);
+
   const html = renderConnectionsPage(session, accounts, {
     justConnected,
     justDisconnected,
     disconnectFailed,
     denied,
     warning,
-  });
-  return new Response(html, {
+  });  return new Response(html, {
     headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
   });
+}
+
+/**
+ * Fills in the owning account for connections Composio reports no profile for,
+ * by asking the provider through Composio's proxy. That costs a live request,
+ * so answers are cached in D1 against the connection id.
+ */
+async function resolveMissingLabels(env: Env, accounts: Map<string, ConnectedAccount>): Promise<void> {
+  const unresolved = [...accounts.values()].filter(
+    (account) => account.status === "ACTIVE" && !account.label,
+  );
+  if (!unresolved.length) return;
+
+  const cached = new Map<string, string>();
+  try {
+    const placeholders = unresolved.map(() => "?").join(", ");
+    const rows = await env.DB.prepare(
+      `SELECT connected_account_id, label FROM account_labels WHERE connected_account_id IN (${placeholders})`,
+    )
+      .bind(...unresolved.map((account) => account.id))
+      .all<{ connected_account_id: string; label: string }>();
+
+    for (const row of rows.results ?? []) cached.set(row.connected_account_id, row.label);
+  } catch (error) {
+    console.error("account_labels lookup failed", error);
+  }
+
+  await Promise.all(
+    unresolved.map(async (account) => {
+      const hit = cached.get(account.id);
+      if (hit) {
+        account.label = hit;
+        return;
+      }
+
+      try {
+        const endpoint = account.testEndpoint ?? (await fetchTestEndpoint(env.COMPOSIO_API_KEY, account.id));
+        if (!endpoint) return;
+
+        const label = await resolveAccountIdentity(env.COMPOSIO_API_KEY, account.id, endpoint);
+        if (!label) return;
+
+        account.label = label;
+        await env.DB.prepare(
+          `INSERT INTO account_labels (connected_account_id, label, resolved_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(connected_account_id) DO UPDATE SET label = excluded.label, resolved_at = excluded.resolved_at`,
+        )
+          .bind(account.id, label, new Date().toISOString())
+          .run();
+      } catch (error) {
+        // A missing label is survivable; the row just shows "Connected" alone.
+        console.error("identity resolution failed", account.slug, error);
+      }
+    }),
+  );
 }
 
 /** Sends the user into Composio's hosted Connect Link for one toolkit. */
@@ -333,7 +392,21 @@ async function disconnectToolkit(request: Request, env: Env, slug: string): Prom
     for (const accountId of accountIds) {
       await deleteConnectedAccount(env.COMPOSIO_API_KEY, accountId);
     }
-    if (accountIds.length) target.searchParams.set("disconnected", connector.slug);
+
+    if (accountIds.length) {
+      target.searchParams.set("disconnected", connector.slug);
+
+      try {
+        const placeholders = accountIds.map(() => "?").join(", ");
+        await env.DB.prepare(
+          `DELETE FROM account_labels WHERE connected_account_id IN (${placeholders})`,
+        )
+          .bind(...accountIds)
+          .run();
+      } catch (error) {
+        console.error("clearing cached account labels failed", error);
+      }
+    }
   } catch (error) {
     console.error("composio disconnect failed", error);
     target.searchParams.set("disconnect_failed", connector.slug);

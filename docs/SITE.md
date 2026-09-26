@@ -127,6 +127,16 @@ belongs to — and were created by POSTing to `/api/v3.1/auth_configs`:
 The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
 `googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
 
+**Account labels.** Composio returns no profile for some toolkits — Google's return only tokens
+and scopes — and Composio's own `word_id` (e.g. `googledrive_weekly-emily`) means nothing to a
+user. Where the connection state does carry an identity it is used directly (LinkedIn's
+`displayName`); otherwise the Worker asks the provider through Composio's proxy
+(`POST /tools/execute/proxy`) using the account's `test_request_endpoint` (Drive's is
+`drive/v3/about?fields=user`) and takes an email or name out of the response. The detail call
+(`GET /connected_accounts/{id}`) is required to read `test_request_endpoint`, because the list
+endpoint omits it. Answers are cached in `account_labels`, so resolution costs one provider
+request per connection. If nothing can be resolved, no label is shown — never a word id.
+
 **Constraints worth knowing**
 
 - Instagram was in the original list and was removed on 2026-09-19 at Ojas's request; its auth
@@ -143,6 +153,10 @@ The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `goog
 id, with email, name, avatar, verification state, organization id, a sign-in counter, and
 timestamps. `/callback` upserts on every login, so repeat sign-ins increment `sign_in_count`
 instead of inserting duplicates.
+
+`migrations/0002_account_labels.sql` creates `account_labels`, a cache of resolved connector
+account labels keyed by Composio connection id (ids are never reused), so identity resolution
+costs one provider request per connection rather than one per page load.
 
 ## Notes
 
