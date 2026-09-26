@@ -38,7 +38,19 @@ import { renderCallPage } from "./call-page";
 import { renderTelegramPage } from "./telegram-page";
 import type { TelegramStatus } from "./telegram";
 import type { Env } from "./env";
-import { routeAgentRequest } from "agents";
+import { calledNumber, incomingCall, verifyWebhook } from "./openai-webhook";
+import {
+  cancelLinkCode,
+  confirmLinkCode,
+  formatPhone,
+  getPhoneLink,
+  pendingCode,
+  sendLinkCode,
+  userForPhone,
+  type PhoneLink,
+} from "./phone";
+import { renderPhonePage } from "./phone-page";
+import { getAgentByName, routeAgentRequest } from "agents";
 
 export { VoiceAgent } from "./voice-agent";
 export { CodingAgent } from "./coding-agent";
@@ -55,6 +67,9 @@ const VOICE_AGENT_ROUTE = "voice-agent";
 const PUBLIC_AGENT_ROUTES = new Set([VOICE_AGENT_ROUTE]);
 const SESSION_COOKIE = "alb_session";
 const PKCE_COOKIE = "alb_pkce";
+/** Set when the user skips linking a phone, so sign-in stops offering it. */
+const PHONE_SKIP_COOKIE = "alb_phone_skip";
+const PHONE_SKIP_TTL_SECONDS = 60 * 60 * 24 * 365;
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const PKCE_TTL_SECONDS = 60 * 10;
 
@@ -126,6 +141,17 @@ async function route(request: Request, env: Env): Promise<Response> {
     return telegramAction(request, env, path);
   }
 
+  // OpenAI announces an incoming phone call here and waits for an accept.
+  if (path === "/openai/webhook") {
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return openaiWebhook(request, env);
+  }
+
+  if (path === "/phone/start" || path === "/phone/verify" || path === "/phone/restart") {
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return phoneAction(request, env, path);
+  }
+
   if (request.method !== "GET" && request.method !== "HEAD") {
     return methodNotAllowed("GET, HEAD");
   }
@@ -155,6 +181,10 @@ async function route(request: Request, env: Env): Promise<Response> {
       return telegramScreen(request, env);
     case "/call":
       return callPage(request, env);
+    case "/phone":
+      return phoneScreen(request, env);
+    case "/phone/skip":
+      return skipPhone(request, env);
     case "/auth/logout":
       return logout(request, env);
     case "/favicon.svg":
@@ -266,8 +296,19 @@ async function finishLogin(request: Request, env: Env): Promise<Response> {
     exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
   };
 
+  // Linking a phone is offered once, straight after sign-in, until it is done
+  // or skipped. A failed lookup just skips the offer.
+  let offerPhone = false;
+  if (!readCookie(request, PHONE_SKIP_COOKIE)) {
+    try {
+      offerPhone = !(await getPhoneLink(env.DB, user.id));
+    } catch (error) {
+      console.error("phone link lookup failed", error);
+    }
+  }
+
   const headers = new Headers({
-    Location: new URL("/app", url).toString(),
+    Location: new URL(offerPhone ? "/phone?welcome=1" : "/app", url).toString(),
     "Cache-Control": "no-store",
   });
   headers.append("Set-Cookie", clearPkce);
@@ -316,8 +357,9 @@ async function appPage(request: Request, env: Env): Promise<Response> {
   if (!warning) await resolveMissingLabels(env, accounts);
 
   const telegram = await telegramStatus(env, session.sub);
+  const phone = await phoneLinkOrNull(env, session.sub);
 
-  const html = renderConnectionsPage(session, accounts, telegram, {
+  const html = renderConnectionsPage(session, accounts, telegram, phone, env.TELNYX_PHONE_NUMBER, {
     justConnected,
     justDisconnected,
     disconnectFailed,
@@ -333,9 +375,165 @@ async function callPage(request: Request, env: Env): Promise<Response> {
   const session = await currentSession(request, env);
   if (!session) return redirect("/signin", request);
 
-  return new Response(renderCallPage({ email: session.email, userId: session.sub }), {
+  const phone = await phoneLinkOrNull(env, session.sub);
+  return new Response(
+    renderCallPage({
+      email: session.email,
+      userId: session.sub,
+      phone: { linked: phone?.phone ?? null, callNumber: env.TELNYX_PHONE_NUMBER },
+    }),
+    { headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" } },
+  );
+}
+
+/* ------------------------------------------------------------------ phone */
+
+/** The user's linked number, or null when there is none or it can't be read. */
+async function phoneLinkOrNull(env: Env, userId: string): Promise<PhoneLink | null> {
+  try {
+    return await getPhoneLink(env.DB, userId);
+  } catch (error) {
+    console.error("phone link lookup failed", error);
+    return null;
+  }
+}
+
+/** The link screen, at whichever step is stored: linked, waiting on a code, or not started. */
+async function phoneScreen(
+  request: Request,
+  env: Env,
+  problem?: { notice: string; welcome: boolean },
+): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  const link = await getPhoneLink(env.DB, session.sub);
+  const pending = link ? null : await pendingCode(env.DB, session.sub);
+  const url = new URL(request.url);
+  const justLinked = url.searchParams.get("linked") === "1" && link !== null;
+
+  const html = renderPhonePage({
+    email: session.email,
+    link,
+    pending,
+    callNumber: env.TELNYX_PHONE_NUMBER,
+    welcome: problem?.welcome ?? url.searchParams.get("welcome") === "1",
+    notice: problem?.notice ?? (justLinked ? "Your number is linked." : null),
+    noticeTone: problem ? "bad" : "ok",
+  });
+  return new Response(html, {
     headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
   });
+}
+
+/** Stops sign-in offering the phone step, then carries on to the accounts page. */
+async function skipPhone(request: Request, env: Env): Promise<Response> {
+  if (!(await currentSession(request, env))) return redirect("/signin", request);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: new URL("/app", request.url).toString(),
+      "Set-Cookie": cookie(PHONE_SKIP_COOKIE, "1", PHONE_SKIP_TTL_SECONDS),
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+/** One of the link form posts: text a code, check a code, or start over. */
+async function phoneAction(request: Request, env: Env, path: string): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+  if (crossOrigin(request)) {
+    return errorPage(403, "Not allowed", "That request didn't come from this page.", {
+      back: { href: "/phone", label: "Back to your phone" },
+    });
+  }
+
+  const form = await request.formData();
+  const field = (name: string) => String(form.get(name) ?? "").trim();
+  // Carried in a hidden field so the post-sign-in screen keeps its "Skip for now".
+  const welcome = field("welcome") === "1";
+  const next = welcome ? "/phone?welcome=1" : "/phone";
+  const problem = (notice: string) => phoneScreen(request, env, { notice, welcome });
+
+  if (path === "/phone/restart") {
+    await cancelLinkCode(env.DB, session.sub);
+    return seeOther(next, request);
+  }
+
+  if (path === "/phone/start") {
+    const phone = field("phone");
+    if (!phone) return problem("Enter your phone number first.");
+    const result = await sendLinkCode(env, session.sub, phone);
+    return result.ok ? seeOther(next, request) : problem(result.message);
+  }
+
+  const code = field("code");
+  if (!code) return problem("Enter the code from the text.");
+  const result = await confirmLinkCode(env, session.sub, code);
+  return result.ok ? seeOther("/phone?linked=1", request) : problem(result.message);
+}
+
+/**
+ * OpenAI's incoming-call webhook.
+ *
+ * A call is answered only when it was made to the site's number from a linked
+ * one; the linked user's own voice agent accepts it. Every verified delivery
+ * gets a 200, including ones that are declined: OpenAI retries anything else,
+ * and a retry after the call's few seconds of ringing can only fail.
+ */
+async function openaiWebhook(request: Request, env: Env): Promise<Response> {
+  const body = await request.text();
+  if (!(await verifyWebhook(env.OPENAI_WEBHOOK_SECRET, request.headers, body))) {
+    console.error("openai webhook: bad signature");
+    return new Response("Invalid signature", { status: 400 });
+  }
+
+  let event: unknown;
+  try {
+    event = JSON.parse(body);
+  } catch {
+    return new Response("Bad JSON", { status: 400 });
+  }
+
+  const call = incomingCall(event);
+  if (!call) return new Response(null, { status: 204 });
+
+  console.log(
+    "openai webhook: incoming call",
+    JSON.stringify({ session: call.sessionId, from: call.from, headers: call.headers }),
+  );
+
+  // Calls to the project's other numbers belong to whatever else answers them.
+  if (!calledNumber(call, env.TELNYX_PHONE_NUMBER)) {
+    console.log("openai webhook: call is for another number, leaving it");
+    return new Response(null, { status: 204 });
+  }
+
+  const userId = call.from ? await userForPhone(env.DB, call.from) : null;
+  if (!userId) {
+    console.log("openai webhook: caller is not linked, declining");
+    await declineCall(env, call.sessionId);
+    return new Response(null, { status: 204 });
+  }
+
+  try {
+    const agent = await getAgentByName(env.VOICE_AGENT, userId);
+    const answer = await agent.answerPhoneCall(call.sessionId);
+    console.log("openai webhook: phone call", JSON.stringify({ answer }));
+  } catch (error) {
+    console.error("openai webhook: voice agent failed to answer", error);
+  }
+  return new Response(null, { status: 204 });
+}
+
+async function declineCall(env: Env, sessionId: string): Promise<void> {
+  const response = await fetch(`https://api.openai.com/v1/live/sessions/${encodeURIComponent(sessionId)}/reject`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ status_code: 603 }),
+  });
+  if (!response.ok) console.error("openai webhook: reject failed", response.status, await response.text());
 }
 
 /**
@@ -643,6 +841,8 @@ function renderConnectionsPage(
   session: Session,
   accounts: Map<string, ConnectedAccount>,
   telegram: TelegramStatus | null,
+  phone: PhoneLink | null,
+  callNumber: string,
   flash: {
     justConnected: string | null;
     justDisconnected: string | null;
@@ -927,6 +1127,10 @@ function renderConnectionsPage(
         padding: 14px 18px 4px;
       }
       .gact .hint { color: var(--muted); font-size: 13px; }
+      .card.phone { margin-top: 14px; }
+      .phonerow { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 18px; }
+      .psub { display: block; color: var(--muted); font-size: 12.5px; }
+      .psub a { color: inherit; font-weight: 550; }
       @media (max-width: 560px) {
         .bl, .who { display: none; }
         .shell { padding: 32px 14px 56px; }
@@ -1003,9 +1207,34 @@ ${rows}
         </span>
         <span class="callgo">Start call</span>
       </a>
+${phoneCard(phone, callNumber)}
     </div>
   </body>
 </html>`;
+}
+
+/** Calling in by phone: the number to dial once linked, or the way to link one. */
+function phoneCard(phone: PhoneLink | null, callNumber: string): string {
+  const number = escapeHtml(formatPhone(callNumber));
+  const body = phone
+    ? `<span class="nm">Call from your phone</span>
+            <span class="psub">From ${escapeHtml(formatPhone(phone.phone))}, call <a href="tel:${escapeHtml(
+              callNumber,
+            )}">${number}</a>.</span>`
+    : `<span class="nm">Call from your phone</span>
+            <span class="psub">Link your number and call Ailobang at ${number}.</span>`;
+  const action = phone
+    ? `<span class="pill"><span class="dot ok"></span>Linked</span>`
+    : `<a class="btn ghost" href="/phone">Link phone</a>`;
+
+  return `      <div class="card phone">
+        <div class="phonerow">
+          <span>
+            ${body}
+          </span>
+          ${action}
+        </div>
+      </div>`;
 }
 
 /**

@@ -16,6 +16,10 @@ Live at **https://ailobang.com**
 | `GET /app` | The post-login **Connect your accounts** page; redirects to `/signin` when signed out |
 | `GET /call` | The call page (a microphone, live transcript, and the voice agent behind them) |
 | `GET /agents/voice-agent/<user id>` | The voice agent's WebSocket; the session cookie decides which agent a caller may reach |
+| `GET /phone` | Link a phone number by SMS code (optional; offered once after sign-in). Links are permanent |
+| `POST /phone/start`, `/phone/verify`, `/phone/restart` | Text a code, check it, or start over with another number |
+| `GET /phone/skip` | Skips the post-sign-in phone step and goes to `/app` |
+| `POST /openai/webhook` | OpenAI's `live.transport.incoming` webhook: a call to the US number from a linked number is accepted by that user's voice agent |
 | `GET /connect/<toolkit>` | Creates a Composio Connect Link for that toolkit and redirects to it |
 | `GET /connect/return/<toolkit>` | Composio's callback; returns the browser to `/app?connected=<toolkit>` |
 | `POST /disconnect/<toolkit>` | Disconnects that toolkit: deletes the user's Composio connection(s) for it |
@@ -59,6 +63,18 @@ Secrets (set with `npx wrangler secret put <NAME>`):
 - `OPENAI_API_KEY` — OpenAI project key, used for the GPT-Live voice session
 - `DEEPSEEK_API_KEY` — DeepSeek key, used by the call harness to choose and run tools
 - `EXA_API_KEY` — Exa key, used by the harness for its built-in web search
+- `TELNYX_API_KEY` — Telnyx key, used to text phone-link codes from `TELNYX_PHONE_NUMBER`
+- `OPENAI_WEBHOOK_SECRET` — signing secret of the OpenAI project webhook for incoming phone calls
+
+## Phone calls
+
+`TELNYX_PHONE_NUMBER` (+1 407 358 0773) is on the Telnyx FQDN connection `ailobang-openai-sip`, which
+sends calls over TLS with SRTP to `sip.api.openai.com:5061`. The number's translated number is the
+OpenAI project id, applied with `ignore_for_to_header` so the SIP `To` header still names the dialled
+number; the webhook uses that to tell these calls from the project's other numbers. OpenAI then posts
+`live.transport.incoming` to `/openai/webhook`, the Worker matches the caller's `From` number to a
+linked user, and that user's `VoiceAgent` accepts the call and attaches a sideband socket to run
+delegations. SMS codes go out through the number's existing messaging profile.
 
 For local development, create `.dev.vars` with those five names set.
 

@@ -54,7 +54,9 @@
   ],
   "vars": {
     "WORKOS_CLIENT_ID": "client_01M2VVVWWF3AT72D5H8FRM0P2Y",
-    "WORKOS_REDIRECT_URI": "https://ailobang.com/callback"
+    "WORKOS_REDIRECT_URI": "https://ailobang.com/callback",
+    // The US Telnyx number: it texts the link codes and takes the phone calls.
+    "TELNYX_PHONE_NUMBER": "+14073580773"
   },
   "routes": [
     {

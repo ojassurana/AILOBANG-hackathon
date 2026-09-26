@@ -1,8 +1,11 @@
 /**
  * The voice agent: one Durable Object per signed-in user.
  *
- * It bridges two WebSockets — the browser's call page on one side and OpenAI's
- * GPT-Live session on the other — and runs the backend harness in between.
+ * A call reaches it one of two ways. From the site, it bridges two WebSockets —
+ * the browser's call page on one side and OpenAI's GPT-Live session on the other.
+ * From a phone, Telnyx carries the audio to OpenAI over SIP, and this object
+ * only attaches a sideband socket to the accepted session. Either way it runs
+ * the backend harness in between.
  *
  * GPT-Live is configured for **client delegation**: it owns the spoken
  * conversation and decides when a request needs account data, but the reasoning
@@ -58,6 +61,8 @@ interface TranscriptLine {
   text: string;
 }
 
+export type PhoneAnswer = "accepted" | "busy" | "duplicate" | "failed";
+
 export class VoiceAgent extends Agent<Env> {
   private live: WebSocket | null = null;
   private liveReady = false;
@@ -71,6 +76,13 @@ export class VoiceAgent extends Agent<Env> {
   /** Pending teardown after the caller's last socket went away. */
   private teardownTimer: ReturnType<typeof setTimeout> | null = null;
   private opening = false;
+  /**
+   * The SIP session this object is attached to, while a phone call is on.
+   *
+   * The phone owns the call then: the browser can't send audio into it or hang
+   * it up, and closing a tab doesn't end it.
+   */
+  private phoneSessionId: string | null = null;
 
   private connectionCount(): number {
     return [...this.getConnections()].length;
@@ -81,6 +93,16 @@ export class VoiceAgent extends Agent<Env> {
     if (this.teardownTimer) {
       clearTimeout(this.teardownTimer);
       this.teardownTimer = null;
+    }
+
+    if (this.onPhone()) {
+      connection.send(
+        JSON.stringify({
+          type: "error",
+          message: "You're on a phone call with Ailobang right now. Hang up the phone to call from here.",
+        }),
+      );
+      return;
     }
 
     try {
@@ -99,6 +121,8 @@ export class VoiceAgent extends Agent<Env> {
   }
 
   onMessage(_connection: Connection, message: WSMessage): void {
+    if (this.onPhone()) return;
+
     if (typeof message !== "string") {
       this.appendAudio(toBytes(message));
       return;
@@ -118,7 +142,7 @@ export class VoiceAgent extends Agent<Env> {
   onClose(): void {
     const remaining = this.connectionCount();
     console.log("voice agent: caller disconnected", JSON.stringify({ remaining }));
-    if (remaining > 0) return;
+    if (remaining > 0 || this.onPhone()) return;
 
     // Do not end the call the instant the socket drops. A reload, a sleeping
     // laptop or a network blip should resume the conversation, not kill it.
@@ -153,34 +177,15 @@ export class VoiceAgent extends Agent<Env> {
       }
     }
 
-    const response = await fetch(LIVE_SOCKET_URL, {
-      headers: { Upgrade: "websocket", Authorization: `Bearer ${this.env.OPENAI_API_KEY}` },
-    });
-
-    const socket = response.webSocket;
-    if (!socket) throw new Error(`live session upgrade rejected (${response.status})`);
-
-    socket.accept();
-    socket.addEventListener("message", (event) => this.onLiveEvent(event.data));
-    socket.addEventListener("close", (event) => {
-      console.log(
-        "voice agent: live socket closed",
-        JSON.stringify({ code: (event as CloseEvent).code, clean: (event as CloseEvent).wasClean }),
-      );
-      this.onLiveClosed("live socket closed");
-    });
-    socket.addEventListener("error", () => console.error("voice agent: live socket error"));
-
-    this.live = socket;
-    this.greeted = false;
-    this.transcript = [];
+    const socket = await this.connectLive(LIVE_SOCKET_URL);
+    this.bindLive(socket);
 
     this.sendLive({
       type: "session.start",
       event_id: `start_${Date.now()}`,
       session: {
         model: LIVE_MODEL,
-        instructions: conversationPrompt(),
+        instructions: conversationPrompt("site"),
         audio: { format: { type: "audio/pcm", rate: SAMPLE_RATE }, output: { voice: VOICE } },
         delegation: { type: "client" },
         store: false,
@@ -197,6 +202,106 @@ export class VoiceAgent extends Agent<Env> {
     }, START_TIMEOUT_MS);
   }
 
+  /**
+   * Answers a phone call OpenAI is holding for this user.
+   *
+   * The Worker has already matched the caller's number to this user. OpenAI
+   * drops a pending SIP session within seconds, so this accepts first and
+   * attaches after, and never waits on anything else in between.
+   */
+  async answerPhoneCall(sessionId: string): Promise<PhoneAnswer> {
+    if (this.phoneSessionId === sessionId) return "duplicate";
+
+    // One call at a time: the site call already holds the session and harness.
+    if (this.live?.readyState === OPEN) {
+      await this.liveCallAction(sessionId, "reject", { status_code: 486 });
+      console.log("voice agent: phone call rejected, already on a call");
+      return "busy";
+    }
+
+    const accepted = await this.liveCallAction(sessionId, "accept", {
+      session: {
+        type: "live",
+        model: LIVE_MODEL,
+        instructions: conversationPrompt("phone"),
+        audio: { output: { voice: VOICE } },
+        delegation: { type: "client" },
+        store: false,
+      },
+    });
+    if (!accepted) return "failed";
+
+    try {
+      const socket = await this.connectLive(`${LIVE_SOCKET_URL}/${encodeURIComponent(sessionId)}/attach`);
+      this.phoneSessionId = sessionId;
+      this.bindLive(socket);
+      this.liveReady = true;
+      console.log("voice agent: phone call attached");
+      this.greet();
+      return "accepted";
+    } catch (error) {
+      // An accepted call with nothing attached would talk but never reach the
+      // accounts, so end it rather than leave the caller with half an assistant.
+      console.error("voice agent: phone attach failed", error);
+      this.phoneSessionId = null;
+      await this.liveCallAction(sessionId, "hangup");
+      return "failed";
+    }
+  }
+
+  private onPhone(): boolean {
+    return this.phoneSessionId !== null && this.live?.readyState === OPEN;
+  }
+
+  /** accept, reject or hangup on a SIP session. Returns whether OpenAI took it. */
+  private async liveCallAction(sessionId: string, action: "accept" | "reject" | "hangup", body?: unknown): Promise<boolean> {
+    const response = await fetch(`${LIVE_SOCKET_URL}/${encodeURIComponent(sessionId)}/${action}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.env.OPENAI_API_KEY}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (response.ok) return true;
+
+    console.error(
+      `voice agent: phone ${action} failed`,
+      JSON.stringify({ status: response.status, body: (await response.text()).slice(0, 500) }),
+    );
+    return false;
+  }
+
+  /**
+   * Opens a Live socket. Workers reach a WebSocket with a plain https fetch
+   * carrying `Upgrade: websocket`.
+   */
+  private async connectLive(url: string): Promise<WebSocket> {
+    const response = await fetch(url, {
+      headers: { Upgrade: "websocket", Authorization: `Bearer ${this.env.OPENAI_API_KEY}` },
+    });
+    const socket = response.webSocket;
+    if (!socket) throw new Error(`live session upgrade rejected (${response.status})`);
+    socket.accept();
+    return socket;
+  }
+
+  private bindLive(socket: WebSocket): void {
+    socket.addEventListener("message", (event) => this.onLiveEvent(event.data));
+    socket.addEventListener("close", (event) => {
+      console.log(
+        "voice agent: live socket closed",
+        JSON.stringify({ code: (event as CloseEvent).code, clean: (event as CloseEvent).wasClean }),
+      );
+      if (this.live === socket) this.onLiveClosed("live socket closed");
+    });
+    socket.addEventListener("error", () => console.error("voice agent: live socket error"));
+
+    this.live = socket;
+    this.greeted = false;
+    this.transcript = [];
+  }
+
   private closeLiveSession(reason: string): void {
     const socket = this.live;
     if (!socket) return;
@@ -210,10 +315,14 @@ export class VoiceAgent extends Agent<Env> {
 
   private onLiveClosed(reason: string): void {
     const callerStillHere = this.connectionCount() > 0;
-    console.log("voice agent: session ended", JSON.stringify({ reason, callerStillHere }));
+    console.log(
+      "voice agent: session ended",
+      JSON.stringify({ reason, callerStillHere, phone: this.phoneSessionId !== null }),
+    );
     this.live = null;
     this.liveReady = false;
     this.harness = null;
+    this.phoneSessionId = null;
     this.broadcast(JSON.stringify({ type: "call", state: "ended", reason }));
   }
 
@@ -235,7 +344,9 @@ export class VoiceAgent extends Agent<Env> {
         break;
 
       case "session.output_audio.delta":
-        this.broadcast(b64decode(String(event.delta ?? "")));
+        // On a phone call this is the sideband's copy of what SIP already
+        // played; an open call page must not play it a second time.
+        if (!this.phoneSessionId) this.broadcast(b64decode(String(event.delta ?? "")));
         break;
 
       case "session.input_transcript.delta":
@@ -450,8 +561,13 @@ export class VoiceAgent extends Agent<Env> {
   }
 }
 
-function conversationPrompt(): string {
-  return `You are Ailobang's voice assistant, talking with someone who is signed in and has connected some of their accounts.
+function conversationPrompt(channel: "site" | "phone"): string {
+  const opening =
+    channel === "phone"
+      ? "You are Ailobang's voice assistant, on a phone call with someone who dialled in from the number linked to their account, which has some of their accounts connected."
+      : "You are Ailobang's voice assistant, talking with someone who is signed in and has connected some of their accounts.";
+
+  return `${opening}
 
 Tone: warm, brief, natural. Most replies are one or two sentences. Never read out markdown, lists or URLs.
 

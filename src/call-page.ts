@@ -6,15 +6,19 @@
  * reasoning, tool calls and account access happen server-side in the agent.
  */
 
+import { formatPhone } from "./phone";
+
 export interface CallPageOptions {
   email: string;
   /** The caller's own id; it is also the Durable Object name the socket routes to. */
   userId: string;
+  /** The other way in: dialling `callNumber` from the `linked` number. */
+  phone?: { linked: string | null; callNumber: string };
 }
 
 const FRAME_SAMPLES = 480; // 20 ms at 24 kHz
 
-export function renderCallPage({ email, userId }: CallPageOptions): string {
+export function renderCallPage({ email, userId, phone }: CallPageOptions): string {
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -148,6 +152,8 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
       .log .label { display: block; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
       .log .you .label { color: var(--muted); }
       .empty { color: var(--muted); font-size: 14px; }
+      .dialin { margin: 14px 0 0; text-align: center; color: var(--muted); font-size: 13.5px; }
+      .dialin a { color: inherit; font-weight: 550; }
       [hidden] { display: none !important; }
     </style>
   </head>
@@ -177,6 +183,7 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
         <p class="note" id="note" hidden></p>
         <p class="error" id="error" hidden></p>
       </div>
+${phoneLine(phone)}
 
       <div class="card">
         <div class="card-head">
@@ -604,6 +611,15 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
     </script>
   </body>
 </html>`;
+}
+
+function phoneLine(phone: CallPageOptions["phone"]): string {
+  if (!phone) return "";
+  const number = formatPhone(phone.callNumber);
+  const dial = `<a href="tel:${escapeHtml(phone.callNumber)}">${escapeHtml(number)}</a>`;
+  return phone.linked
+    ? `      <p class="dialin">Away from the site? Call ${dial} from ${escapeHtml(formatPhone(phone.linked))}.</p>`
+    : `      <p class="dialin">You can also call ${dial} from your phone. <a href="/phone">Link your number</a> first.</p>`;
 }
 
 function escapeHtml(value: string): string {
