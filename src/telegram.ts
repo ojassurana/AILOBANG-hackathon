@@ -174,7 +174,21 @@ export class TelegramSession extends DurableObject<Env> {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       this.createSchema();
+      this.restoreConnectedAfterRequestError();
     });
+  }
+
+  /**
+   * Undoes the one way a working login used to end up in the error phase: a
+   * failed send recorded as a login failure. Such a row still has its session
+   * and the update line, and no code hash — a login that failed before
+   * finishing always has a hash, or no session at all.
+   */
+  private restoreConnectedAfterRequestError(): void {
+    const row = this.readLogin();
+    if (row.phase !== "error" || !row.session || row.phone_code_hash) return;
+    if (!this.readUpdatesState()) return;
+    this.writeLogin(loginConnected(row.code_sent_at ?? Date.now(), row.phone));
   }
 
   /**
@@ -668,6 +682,13 @@ export class TelegramSession extends DurableObject<Env> {
       this.wipe();
       return;
     }
+    // A connected account whose session still works stays connected: a refused
+    // photo, a flood wait or a dropped socket is about that one request, and
+    // recording it as a login failure would read everywhere as "not connected".
+    if (this.readLogin().phase === "connected") {
+      console.error("telegram: request failed on a live session", error);
+      return;
+    }
     const retryAt = classified.seconds ? Date.now() + classified.seconds * 1000 : null;
     // `phone` is passed only by `beginLogin`, which can fail before anything has
     // been written: without it the number the user just typed would be lost, and
@@ -1137,17 +1158,30 @@ export class TelegramSession extends DurableObject<Env> {
       if ("reason" in loaded) return loaded;
       shownName = loaded.name;
 
-      const upload = new CustomFile(loaded.name, loaded.bytes.byteLength, "", Buffer.from(loaded.bytes));
-      return (client, peer) =>
+      const upload = () =>
+        new CustomFile(loaded.name, loaded.bytes.byteLength, "", Buffer.from(loaded.bytes));
+      const sendAs = (client: TelegramClient, peer: string | Api.InputPeerUser, forceDocument: boolean) =>
         client.sendFile(peer, {
-          file: upload,
+          file: upload(),
           caption: settled.caption || undefined,
-          forceDocument: settled.mode === "document",
+          forceDocument,
           voiceNote: settled.mode === "voice",
           supportsStreaming: true,
           // Each worker is a media socket of its own; a few is plenty for 20 MB.
           workers: 4,
         });
+
+      return async (client, peer) => {
+        const asDocument = settled.mode === "document";
+        try {
+          return await sendAs(client, peer, asDocument);
+        } catch (error) {
+          // Telegram will not make a photo of every image it is given (odd
+          // dimensions, an encoding it dislikes); the same bytes still go as a file.
+          if (asDocument || !isPhotoRefusal(error)) throw error;
+          return sendAs(client, peer, true);
+        }
+      };
     });
   }
 
@@ -1360,6 +1394,11 @@ export class TelegramSession extends DurableObject<Env> {
       now: Date.now(),
     });
   }
+}
+
+function isPhotoRefusal(error: unknown): boolean {
+  const name = (error as { errorMessage?: unknown } | null)?.errorMessage;
+  return typeof name === "string" && /^(IMAGE_PROCESS_FAILED|PHOTO_)/.test(name);
 }
 
 function refusedSend(reason: string, title: string | null = null): SendResult {
