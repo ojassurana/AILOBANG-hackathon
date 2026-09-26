@@ -9,9 +9,13 @@
 
 import {
   CONNECTORS,
+  GOOGLESUPER_VISIBLE_SERVICES,
+  GOOGLE_GROUP,
   connectorBySlug,
   connectorsForToolkit,
+  googleConnectors,
   logoUrl,
+  standaloneConnectors,
   type Connector,
 } from "./connectors";
 import {
@@ -451,6 +455,49 @@ function renderConnectionsPage(
 ): string {
   const connected = CONNECTORS.filter((c) => accounts.get(c.toolkit)?.status === "ACTIVE").length;
 
+  const googleAccount = accounts.get(GOOGLE_GROUP.toolkit);
+  const groupServices = googleConnectors();
+  const shownServices = groupServices.slice(0, GOOGLESUPER_VISIBLE_SERVICES);
+  const hiddenServices = groupServices.length - shownServices.length;
+
+  const groupStatus =
+    googleAccount?.status === "ACTIVE"
+      ? `<span class="pill"><span class="dot ok"></span>Connected</span>${
+          googleAccount.label ? `<span class="acct">${escapeHtml(googleAccount.label)}</span>` : ""
+        }`
+      : googleAccount?.status === "PENDING"
+        ? `<span class="pill"><span class="dot wait"></span>Finishing sign-in</span>`
+        : googleAccount?.status === "FAILED"
+          ? `<span class="pill"><span class="dot bad"></span>Failed</span>`
+          : `<span class="muted">Not connected &middot; one login covers all ${groupServices.length}</span>`;
+
+  // Decorative here: the expanded box lists every service by name, and the alt
+  // text otherwise bloats the disclosure's accessible name.
+  const groupStrip = `<span class="strip">${shownServices
+    .map(
+      (service) =>
+        `<img src="${logoUrl(service.slug)}" alt="" title="${escapeHtml(
+          service.name,
+        )}" width="16" height="16" loading="lazy" />`,
+    )
+    .join("")}${hiddenServices > 0 ? `<span class="more">+${hiddenServices}</span>` : ""}</span>`;
+
+  const groupActions =
+    googleAccount?.status === "ACTIVE"
+      ? `<a class="btn ghost" href="/connect/${GOOGLE_GROUP.slug}">Reconnect</a>
+                <form class="inline" method="post" action="/disconnect/${GOOGLE_GROUP.slug}"
+                      onsubmit="return confirm('${disconnectConfirmText(GOOGLE_GROUP)}')">
+                  <button class="link" type="submit">Disconnect</button>
+                </form>`
+      : `<a class="btn" href="/connect/${GOOGLE_GROUP.slug}">Connect Google</a>`;
+
+  const groupRows = googleConnectors()
+    .map((connector) => connectorRow(connector, accounts.get(connector.toolkit), true))
+    .join("\n");
+
+  const rows = standaloneConnectors()
+    .map((connector) => connectorRow(connector, accounts.get(connector.toolkit)))
+    .join("\n");
   let banner = "";
   if (flash.denied) {
     banner = `<p class="note bad">That connection didn't finish (${escapeHtml(flash.denied)}). You can try again below.</p>`;
@@ -477,10 +524,6 @@ function renderConnectionsPage(
   } else if (flash.warning) {
     banner = `<p class="note bad">${escapeHtml(flash.warning)}</p>`;
   }
-
-  const rows = CONNECTORS.map((connector) =>
-    connectorRow(connector, accounts.get(connector.toolkit)),
-  ).join("\n");
 
   return `<!doctype html>
 <html lang="en">
@@ -587,6 +630,40 @@ function renderConnectionsPage(
         color: var(--muted);
         font-size: 14px;
       }
+      .grp > summary {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 16px 18px;
+        cursor: pointer;
+        list-style: none;
+      }
+      .grp > summary::-webkit-details-marker { display: none; }
+      .grp > summary:hover { background: rgba(127, 127, 127, 0.05); }
+      .grp[open] > summary { border-bottom: 1px solid var(--border); }
+      .gtitle { display: flex; align-items: center; gap: 12px; flex: 1 1 auto; min-width: 0; }
+      .gtitle img { border-radius: 8px; flex: none; }
+      .gright { display: flex; align-items: center; gap: 12px; flex: none; }
+      .gright .strip { margin-top: 0; }
+      .chev {
+        width: 8px;
+        height: 8px;
+        margin-left: 2px;
+        border-right: 1.75px solid var(--muted);
+        border-bottom: 1.75px solid var(--muted);
+        transform: rotate(45deg);
+        transition: transform 0.15s ease;
+      }
+      .grp[open] .chev { transform: rotate(-135deg); }
+      .gact {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 12px;
+        padding: 14px 18px 4px;
+      }
+      .gact .hint { color: var(--muted); font-size: 13px; }
       @media (max-width: 560px) {
         .bl, .who { display: none; }
         .shell { padding: 32px 14px 56px; }
@@ -601,6 +678,8 @@ function renderConnectionsPage(
         form.inline { margin-left: 8px; }
         /* Keep the button on one line on narrow screens. */
         .sm-hide { display: none; }
+        /* The expanded box lists every service, so the summary strip is noise. */
+        .gright .strip { display: none; }
       }
     </style>
   </head>
@@ -615,6 +694,29 @@ function renderConnectionsPage(
       </div>
 ${banner}
       <div class="card">
+        <details class="grp">
+          <summary>
+            <span class="gtitle">
+              <img src="${logoUrl(GOOGLE_GROUP.toolkit)}" alt="" width="28" height="28" loading="lazy" />
+              <span>
+                <span class="nm">${escapeHtml(GOOGLE_GROUP.name)}</span>
+                <span class="bl">${groupStatus}</span>
+              </span>
+            </span>
+            <span class="gright">${groupStrip}<span class="chev"></span></span>
+          </summary>
+          <div class="gbody">
+            <div class="gact">
+              <span class="hint">One Google login connects every service below.</span>
+              <span>${groupActions}</span>
+            </div>
+            <table>
+${groupRows}
+            </table>
+          </div>
+        </details>
+      </div>
+      <div class="card">
         <table>
 ${rows}
         </table>
@@ -625,22 +727,31 @@ ${rows}
 </html>`;
 }
 
-function connectorRow(connector: Connector, account: ConnectedAccount | undefined): string {
-  const status = account?.status ?? null;
-
-  // The Google rows share a single googlesuper connection, so connecting one
-  // grants the others and disconnecting one takes them all with it.
-  const sharedRows = connectorsForToolkit(connector.toolkit).filter(
+/**
+ * Rows sharing one connection are disconnected together, so the prompt has to
+ * warn about the others rather than just naming the one clicked.
+ */
+function disconnectConfirmText(connector: Connector): string {
+  const others = connectorsForToolkit(connector.toolkit).filter(
     (other) => other.slug !== connector.slug,
   );
-  const confirmText = (
-    sharedRows.length
-      ? `Disconnect ${connector.name}? This disconnects your whole Google account, including ${sharedRows
+
+  return (
+    others.length
+      ? `Disconnect ${connector.name}? This disconnects your whole Google account, including ${others
           .slice(0, 3)
           .map((other) => other.name)
-          .join(", ")}${sharedRows.length > 3 ? ` and ${sharedRows.length - 3} more` : ""}.`
+          .join(", ")}${others.length > 3 ? ` and ${others.length - 3} more` : ""}.`
       : `Disconnect ${connector.name}?`
   ).replace(/'/g, "\\'");
+}
+
+function connectorRow(
+  connector: Connector,
+  account: ConnectedAccount | undefined,
+  insideGroup = false,
+): string {
+  const status = account?.status ?? null;
 
   let state: string;
   if (status === "ACTIVE") {
@@ -652,19 +763,24 @@ function connectorRow(connector: Connector, account: ConnectedAccount | undefine
   } else if (status === "FAILED") {
     state = `<span class="pill"><span class="dot bad"></span>Failed</span>`;
   } else {
-    state = `<span class="muted">Not connected</span>${
-      sharedRows.length ? `<span class="acct">Shares one Google login</span>` : ""
-    }`;
+    state = `<span class="muted">Not connected</span>`;
   }
 
-  const action =
-    status === "ACTIVE"
-      ? `<a class="btn ghost" href="/connect/${connector.slug}">Reconnect</a>
+  // Rows inside the group carry no actions: the group one connection, so its
+  // header owns connect, reconnect and disconnect.
+  let actionCell = "";
+  if (!insideGroup) {
+    const action =
+      status === "ACTIVE"
+        ? `<a class="btn ghost" href="/connect/${connector.slug}">Reconnect</a>
               <form class="inline" method="post" action="/disconnect/${connector.slug}"
-                    onsubmit="return confirm('${confirmText}')">
+                    onsubmit="return confirm('${disconnectConfirmText(connector)}')">
                 <button class="link" type="submit">Disconnect</button>
               </form>`
-      : `<a class="btn" href="/connect/${connector.slug}">Connect<span class="sm-hide"> now</span></a>`;
+        : `<a class="btn" href="/connect/${connector.slug}">Connect<span class="sm-hide"> now</span></a>`;
+
+    actionCell = `<td class="act">${action}</td>`;
+  }
 
   return `          <tr>
             <td>
@@ -677,7 +793,7 @@ function connectorRow(connector: Connector, account: ConnectedAccount | undefine
               </span>
             </td>
             <td>${state}</td>
-            <td class="act">${action}</td>
+            ${actionCell}
           </tr>`;
 }
 

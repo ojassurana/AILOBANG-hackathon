@@ -15,6 +15,9 @@ Live at **https://ailobang.com**
 | `GET /callback` | Exchanges the WorkOS code, upserts the user in D1, sets the session cookie |
 | `GET /app` | The post-login **Connect your accounts** page; redirects to `/signin` when signed out |
 | `GET /connect/<toolkit>` | Creates a Composio Connect Link for that toolkit and redirects to it |
+| `POST /disconnect/<toolkit>` | Disconnects that toolkit: deletes the user's Composio connection(s) for it |
+
+`<toolkit>` is a connector's `slug`, or `google` for the shared Google group.
 | `GET /connect/return/<toolkit>` | Composio's callback; returns the browser to `/app?connected=<toolkit>` |
 | `POST /disconnect/<toolkit>` | Disconnects that toolkit: deletes the user's Composio connection(s) for it |
 | `GET /auth/logout` | Ends the WorkOS session and clears the local cookie |
@@ -128,13 +131,18 @@ were created by POSTing to `/api/v3.1/auth_configs`:
 The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
 `googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
 
-**One Google login.** The Google rows do not hold their own connections — they all read a single
-`googlesuper` connection, so one consent covers every Google service listed. A row exists for each
-service that consent actually grants: Drive, Gmail, Calendar, Sheets, Docs, Slides, Photos,
-Contacts, Tasks, Analytics and Ads. Connecting any one of them lights them all; disconnecting one
-disconnects all, and the confirm prompt says so. `src/connectors.ts` expresses this as `slug` vs
-`toolkit`: the `slug` is the row's name and URL segment, the `toolkit` is where the Composio
-connection lives (everything except the Google rows has the two equal).
+**One Google login, one collapsible box.** Every Google service the consent grants lives inside a
+single "Google Services" card — Drive, Gmail, Calendar, Sheets, Docs, Slides, Photos, Contacts,
+Tasks, Analytics and Ads. The collapsed summary shows the group name, the live status and a strip
+of service logos (six, then "+N"); expanding it lists each service and its state.
+
+The rows inside carry no buttons: the group owns the connection, so one **Connect Google** — or
+**Reconnect** and **Disconnect** — applies to all of them, and the disconnect prompt warns that it
+takes the whole Google account with it. `src/connectors.ts` expresses this as `slug` vs `toolkit`:
+the `slug` names a row and its URL, the `toolkit` is where the Composio connection lives
+(`googlesuper` for every Google row). `GOOGLE_GROUP` is the group itself, reachable at
+`/connect/google` and `/disconnect/google`, so the flash messages read "Google Services" rather
+than the name of whichever service happened to start the flow.
 
 Not every Google toolkit in Composio is part of that consent, so those are deliberately **not**
 rows: Google Maps is its own connection (a Cloud API-key service), and Meet, Chat, Classroom,

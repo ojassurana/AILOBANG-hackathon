@@ -7,8 +7,8 @@
  *
  * `slug` names the row and appears in its URL. `toolkit` names the Composio
  * toolkit the connection actually lives under — the difference matters for the
- * Google rows, which share one `googlesuper` connection so a single Google
- * consent covers Drive, Gmail, Sheets and Docs instead of four separate ones.
+ * Google services, which share one `googlesuper` connection so a single Google
+ * consent covers all of them instead of one consent each.
  *
  * Toolkit slugs are irregular: googledrive/googlesheets/googledocs take no
  * underscore, while google_maps does.
@@ -26,6 +26,23 @@ export interface Connector {
 /** Google Super: one consent for Drive, Gmail, Sheets, Docs, Calendar and more. */
 const GOOGLESUPER_AUTH_CONFIG = "ac_NJgQSgfqbj_V";
 
+/** How many service logos the collapsed group shows before switching to "+N". */
+export const GOOGLESUPER_VISIBLE_SERVICES = 6;
+
+/**
+ * The collapsed "Google Services" box. It stands for the single shared connection
+ * and carries the connect / disconnect actions for every Google service, so the
+ * rows inside it show status only.
+ */
+export const GOOGLE_GROUP: Connector = {
+  slug: "google",
+  name: "Google Services",
+  blurb: "One Google login covers all of these",
+  toolkit: "googlesuper",
+  authConfigId: GOOGLESUPER_AUTH_CONFIG,
+};
+
+/** Every Google service the one consent grants. */
 export const CONNECTORS: Connector[] = [
   {
     slug: "googledrive",
@@ -149,10 +166,20 @@ export const CONNECTORS: Connector[] = [
 ];
 
 export function connectorBySlug(slug: string): Connector | undefined {
-  return CONNECTORS.find((c) => c.slug === slug);
+  return slug === GOOGLE_GROUP.slug ? GOOGLE_GROUP : CONNECTORS.find((c) => c.slug === slug);
 }
 
-/** Every row backed by the same connection, e.g. the four Google ones. */
+/** The Google services shown inside the group, in shelf order. */
+export function googleConnectors(): Connector[] {
+  return CONNECTORS.filter((c) => c.toolkit === GOOGLE_GROUP.toolkit);
+}
+
+/** Everything outside the group — the rows that stand on their own. */
+export function standaloneConnectors(): Connector[] {
+  return CONNECTORS.filter((c) => c.toolkit !== GOOGLE_GROUP.toolkit);
+}
+
+/** Every row backed by the same connection, e.g. all the Google services. */
 export function connectorsForToolkit(toolkit: string): Connector[] {
   return CONNECTORS.filter((c) => c.toolkit === toolkit);
 }
