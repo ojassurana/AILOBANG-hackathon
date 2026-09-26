@@ -1,8 +1,10 @@
+**[ailobang.com](https://ailobang.com)**
+
 # AI Lobang
 
 **Every tool you own, one phone call away.**
 
-`plan.ailobang.com` · `ailobang.com`
+`plan.ailobang.com`
 
 ---
 
