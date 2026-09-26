@@ -2,8 +2,9 @@
  * The connector shelf shown on "Connect your accounts".
  *
  * Each entry needs an auth config in the Composio project the API key belongs to
- * (project "AiLobang"), and all are Composio-managed OAuth2, so the project needs
- * no OAuth apps of its own.
+ * (project "AiLobang"). Almost all are Composio-managed OAuth2, so the project
+ * needs no OAuth apps of its own; the exception is Cursor, which Composio does
+ * not manage — see its entry below.
  *
  * `slug` names the row and appears in its URL. `toolkit` names the Composio
  * toolkit the connection actually lives under — the difference matters for the
@@ -162,6 +163,17 @@ export const CONNECTORS: Connector[] = [
     blurb: "Places and directions",
     toolkit: "google_maps",
     authConfigId: "ac_rMGoQhWXFi0X",
+  },
+  {
+    // The one row Composio does not manage: Cursor has no managed auth scheme,
+    // so this auth config is `use_custom_auth` with scheme API_KEY, and the
+    // Connect Link asks the user to paste their own Cursor API key instead of
+    // running an OAuth consent.
+    slug: "cursor",
+    name: "Cursor",
+    blurb: "Cloud agents and usage",
+    toolkit: "cursor",
+    authConfigId: "ac_KvRPE8I581Gi",
   },
 ];
 

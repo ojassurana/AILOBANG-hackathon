@@ -166,15 +166,29 @@ Notes worth keeping in mind:
   signed-in user, so one caller cannot reach another's agent.
 
 
-**Auth configs.** Composio requires an `auth_config_id` per toolkit. All of them are
+**Auth configs.** Composio requires an `auth_config_id` per toolkit. All but one are
 Composio-managed OAuth2 configs (`is_composio_managed: true`), so the project needs no OAuth
-apps of its own. The four Google rows share one `googlesuper` config; the rest have their own.
+apps of its own. The Google rows share one `googlesuper` config; the rest have their own.
 They live in the **`AiLobang`** project — the project the `COMPOSIO_API_KEY` belongs to — and
 were created by POSTing to `/api/v3.1/auth_configs`:
 
 ```json
 { "toolkit": { "slug": "gmail" }, "auth_config": { "type": "use_composio_managed_auth" } }
 ```
+
+**Cursor is the exception.** Composio lists no managed scheme for it
+(`composio_managed_auth_schemes: []`), so its config is a custom one:
+
+```json
+{ "toolkit": { "slug": "cursor" }, "auth_config": { "type": "use_custom_auth", "authScheme": "API_KEY" } }
+```
+
+That changes the user's experience on that row: instead of an OAuth consent, Composio's Connect
+Link renders a form asking for a Cursor API key (from Cursor → Dashboard → Integrations for Cloud
+Agents, Settings → Advanced for the Admin API). Everything else about the row is unchanged —
+same Connect Link endpoint, same callback, same status and Disconnect handling. Identity
+resolution also still works, because Composio exposes Cursor's
+`get_current_user_endpoint` (`https://api.cursor.com/v0/me`) as the connection's test endpoint.
 
 The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
 `googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
