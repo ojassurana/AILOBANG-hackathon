@@ -629,13 +629,16 @@ function connectorRow(connector: Connector, account: ConnectedAccount | undefine
   const status = account?.status ?? null;
 
   // The Google rows share a single googlesuper connection, so connecting one
-  // grants the others and disconnecting one takes them with it.
+  // grants the others and disconnecting one takes them all with it.
   const sharedRows = connectorsForToolkit(connector.toolkit).filter(
     (other) => other.slug !== connector.slug,
   );
   const confirmText = (
     sharedRows.length
-      ? `Disconnect ${connector.name}? This also disconnects ${sharedRows.map((other) => other.name).join(", ")}.`
+      ? `Disconnect ${connector.name}? This disconnects your whole Google account, including ${sharedRows
+          .slice(0, 3)
+          .map((other) => other.name)
+          .join(", ")}${sharedRows.length > 3 ? ` and ${sharedRows.length - 3} more` : ""}.`
       : `Disconnect ${connector.name}?`
   ).replace(/'/g, "\\'");
 

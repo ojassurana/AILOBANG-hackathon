@@ -128,15 +128,21 @@ were created by POSTing to `/api/v3.1/auth_configs`:
 The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
 `googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
 
-**One Google login.** The four Google rows (Drive, Gmail, Sheets, Docs) do not hold their own
-connections — they all read a single `googlesuper` connection, so one Google consent covers all of
-them. `src/connectors.ts` expresses this as `slug` vs `toolkit`: the `slug` is the row's name and
-URL segment, the `toolkit` is where the Composio connection actually lives (everything except the
-Google rows has the two equal). Connecting any Google row lights all four; disconnecting one
-disconnects all four, and the confirm prompt names the others. The consent Google shows is broad
-(Drive, Gmail, Docs, Sheets, Calendar, Ads, Analytics, Tasks and Photos scopes) — that breadth is
-the price of a single login. Google Maps stays separate, since it is a Cloud API-key service rather
-than part of the Google account consent.
+**One Google login.** The Google rows do not hold their own connections — they all read a single
+`googlesuper` connection, so one consent covers every Google service listed. A row exists for each
+service that consent actually grants: Drive, Gmail, Calendar, Sheets, Docs, Slides, Photos,
+Contacts, Tasks, Analytics and Ads. Connecting any one of them lights them all; disconnecting one
+disconnects all, and the confirm prompt says so. `src/connectors.ts` expresses this as `slug` vs
+`toolkit`: the `slug` is the row's name and URL segment, the `toolkit` is where the Composio
+connection lives (everything except the Google rows has the two equal).
+
+Not every Google toolkit in Composio is part of that consent, so those are deliberately **not**
+rows: Google Maps is its own connection (a Cloud API-key service), and Meet, Chat, Classroom,
+BigQuery, Cloud Vision, Admin, Search Console, Data Studio and Address Validation are separate
+toolkits the single login does not grant — listed as connected they would be a lie, and they would
+need their own connect flow. Google Photos is real but narrow: the granted scope is
+`photoslibrary.*.appcreateddata`, so it can reach only photos the app itself created, which is why
+its blurb says so.
 
 **Account labels.** Composio returns no profile for some toolkits — Google's return only tokens
 and scopes — and Composio's own `word_id` (e.g. `googledrive_weekly-emily`) means nothing to a
