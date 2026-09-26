@@ -215,6 +215,7 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
         var playHead = 0;
         var state = "idle";
         var speechFrames = 0;
+        var reconnects = 0;
         var startedAt = 0;
         var timerId = 0;
         var resampleCarry = 0;
@@ -448,6 +449,7 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
           if (message.type === "call") {
             if (message.state === "live") {
               state = "live";
+              reconnects = 0;
               // The button is disabled while starting; give it back so the same
               // press can end the call.
               mic.disabled = false;
@@ -457,7 +459,9 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
               hint.textContent = "Just talk. Press the microphone again to end the call.";
               if (!timerId) startTimer();
             } else if (message.state === "ended") {
-              finish("Call ended", message.seconds);
+              // The agent says why it ended, which is worth showing rather than
+              // swallowing behind a generic message.
+              finish(message.reason ? "Call ended: " + message.reason : "Call ended", message.seconds);
             } else {
               mic.dataset.state = "connecting";
               setStatus("Connecting", "wait");
@@ -528,12 +532,26 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
           source = context.createMediaStreamSource(stream);
           source.connect(capture);
 
+          connectSocket();
+        }
+
+        /** The agent keeps a call alive for a minute, so a dropped socket resumes it. */
+        function connectSocket() {
           var protocol = location.protocol === "https:" ? "wss:" : "ws:";
           socket = new WebSocket(protocol + "//" + location.host + "/agents/voice-agent/" + encodeURIComponent(USER_ID));
           socket.binaryType = "arraybuffer";
           socket.onmessage = onMessage;
           socket.onerror = function () { setError("The call connection dropped."); };
-          socket.onclose = function () { if (state !== "ended" && state !== "idle") finish("Call ended"); };
+          socket.onclose = function () {
+            if (state === "ended" || state === "idle") return;
+            if (reconnects < 3) {
+              reconnects += 1;
+              setStatus("Reconnecting", "wait");
+              setTimeout(connectSocket, 1500);
+              return;
+            }
+            finish("Call ended");
+          };
         }
 
         function hangUp() {
@@ -549,9 +567,20 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
         copyBtn.addEventListener("click", copyTranscript);
         downloadBtn.addEventListener("click", downloadTranscript);
 
-        window.addEventListener("pagehide", function () {
-          if (socket && socket.readyState === 1) socket.send(JSON.stringify({ type: "hangup" }));
+        // A hidden tab must not end the call. Ending it on pagehide made a tab
+        // switch or a backgrounded browser look like a dropped call, and the
+        // browser suspends audio for background pages, so resume the context
+        // rather than losing the microphone.
+        document.addEventListener("visibilitychange", function () {
+          if (!document.hidden && context && context.state === "suspended") context.resume();
         });
+
+        // Keeps the socket busy so nothing can mistake a quiet line for a dead one.
+        setInterval(function () {
+          if (state !== "live") return;
+          if (context && context.state === "suspended") context.resume();
+          if (socket && socket.readyState === 1) socket.send(JSON.stringify({ type: "ping" }));
+        }, 10000);
       })();
     </script>
   </body>

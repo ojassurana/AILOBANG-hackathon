@@ -37,6 +37,8 @@ const TOOL_ROUTER_KEY = "toolRouterSession";
 const TRANSCRIPT_SETTLE_MS = 350;
 /** GPT-Live normally ends the session itself; this backstops a silent socket. */
 const CLOSE_TIMEOUT_MS = 15000;
+/** How long a call survives with no connected caller, so a reload can resume it. */
+const RECONNECT_GRACE_MS = 60000;
 /** How long a session may take to report itself started before the call gives up. */
 const START_TIMEOUT_MS = 8000;
 /**
@@ -64,13 +66,27 @@ export class VoiceAgent extends Agent<Env> {
   private readonly delegations = new DelegationQueue(MAX_QUEUED_DELEGATIONS, (error) =>
     console.error("voice agent: delegation failed", error),
   );
+  /** Pending teardown after the caller's last socket went away. */
+  private teardownTimer: ReturnType<typeof setTimeout> | null = null;
+  private opening = false;
+
+  private connectionCount(): number {
+    return [...this.getConnections()].length;
+  }
 
   async onConnect(connection: Connection, _context: ConnectionContext): Promise<void> {
+    // A caller returning within the grace window resumes the call in flight.
+    if (this.teardownTimer) {
+      clearTimeout(this.teardownTimer);
+      this.teardownTimer = null;
+    }
+
     try {
       // A socket can die without its close event ever reaching this object
       // (an idle session ended by OpenAI, a hibernation gap), so the field is
       // only trusted while the socket is actually open.
       if (this.live?.readyState !== OPEN) await this.openLiveSession();
+      console.log("voice agent: caller connected", JSON.stringify({ connections: this.connectionCount(), liveReady: this.liveReady }));
       connection.send(JSON.stringify({ type: "call", state: this.liveReady ? "live" : "connecting" }));
     } catch (error) {
       console.error("voice agent: live session failed", error);
@@ -93,16 +109,36 @@ export class VoiceAgent extends Agent<Env> {
       return;
     }
 
-    if (control.type === "hangup") this.closeLiveSession();
+    if (control.type === "hangup") this.closeLiveSession("caller hung up");
+    // "ping" needs no reply: it exists so the caller's socket is never idle.
   }
 
   onClose(): void {
-    if ([...this.getConnections()].length === 0) this.closeLiveSession();
+    const remaining = this.connectionCount();
+    console.log("voice agent: caller disconnected", JSON.stringify({ remaining }));
+    if (remaining > 0) return;
+
+    // Do not end the call the instant the socket drops. A reload, a sleeping
+    // laptop or a network blip should resume the conversation, not kill it.
+    this.teardownTimer = setTimeout(() => {
+      this.teardownTimer = null;
+      if (this.connectionCount() === 0) this.closeLiveSession("caller never came back");
+    }, RECONNECT_GRACE_MS);
   }
 
   /* ----------------------------------------------------------- live session */
 
   private async openLiveSession(): Promise<void> {
+    if (this.opening) return;
+    this.opening = true;
+    try {
+      await this.startLiveSession();
+    } finally {
+      this.opening = false;
+    }
+  }
+
+  private async startLiveSession(): Promise<void> {
     // Replace rather than reuse: an object can hold a socket that is already dead.
     const previous = this.live;
     this.live = null;
@@ -124,7 +160,13 @@ export class VoiceAgent extends Agent<Env> {
 
     socket.accept();
     socket.addEventListener("message", (event) => this.onLiveEvent(event.data));
-    socket.addEventListener("close", () => this.onLiveClosed());
+    socket.addEventListener("close", (event) => {
+      console.log(
+        "voice agent: live socket closed",
+        JSON.stringify({ code: (event as CloseEvent).code, clean: (event as CloseEvent).wasClean }),
+      );
+      this.onLiveClosed("live socket closed");
+    });
     socket.addEventListener("error", () => console.error("voice agent: live socket error"));
 
     this.live = socket;
@@ -148,26 +190,29 @@ export class VoiceAgent extends Agent<Env> {
       if (this.live === socket && !this.liveReady) {
         console.error("voice agent: session start timed out");
         this.broadcast(JSON.stringify({ type: "error", message: "The call didn't start. Please try again." }));
-        this.onLiveClosed();
+        this.onLiveClosed("session start timed out");
       }
     }, START_TIMEOUT_MS);
   }
 
-  private closeLiveSession(): void {
+  private closeLiveSession(reason: string): void {
     const socket = this.live;
     if (!socket) return;
 
+    console.log("voice agent: closing live session", JSON.stringify({ reason }));
     this.sendLive({ type: "session.close", event_id: `close_${Date.now()}` });
     setTimeout(() => {
-      if (this.live === socket) this.onLiveClosed();
+      if (this.live === socket) this.onLiveClosed(`close timed out (${reason})`);
     }, CLOSE_TIMEOUT_MS);
   }
 
-  private onLiveClosed(): void {
+  private onLiveClosed(reason: string): void {
+    const callerStillHere = this.connectionCount() > 0;
+    console.log("voice agent: session ended", JSON.stringify({ reason, callerStillHere }));
     this.live = null;
     this.liveReady = false;
     this.harness = null;
-    this.broadcast(JSON.stringify({ type: "call", state: "ended" }));
+    this.broadcast(JSON.stringify({ type: "call", state: "ended", reason }));
   }
 
   private onLiveEvent(data: unknown): void {
@@ -211,7 +256,7 @@ export class VoiceAgent extends Agent<Env> {
         this.broadcast(
           JSON.stringify({ type: "call", state: "ended", seconds: event.usage?.seconds ?? null }),
         );
-        this.onLiveClosed();
+        this.onLiveClosed("gpt-live ended the session");
         break;
 
       case "error":
@@ -256,7 +301,18 @@ export class VoiceAgent extends Agent<Env> {
   private appendAudio(bytes: Uint8Array): void {
     // PCM16: an odd trailing byte would desync the stream, so it is dropped.
     const length = bytes.length - (bytes.length % 2);
-    if (!this.live || !this.liveReady || length === 0) return;
+    if (length === 0) return;
+
+    // The Live socket can vanish without a close event reaching us (an eviction,
+    // a dropped upstream). Audio arriving is the cue that the call is still on,
+    // so bring the session back rather than swallowing the caller's speech.
+    if (this.live?.readyState !== OPEN) {
+      if (!this.opening) {
+        console.log("voice agent: audio arrived with no live session, reopening");
+        void this.openLiveSession().catch((error) => console.error("voice agent: reopen failed", error));
+      }
+      return;
+    }
 
     this.sendLive({
       type: "session.input_audio.append",

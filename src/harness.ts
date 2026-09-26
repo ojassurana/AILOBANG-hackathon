@@ -24,8 +24,10 @@ import { humanizePass, strategyFor } from "./humanize";
 import type { McpClient, McpTool } from "./mcp";
 import { TELEGRAM_TOOLS, TelegramToolbox, type TelegramActions } from "./telegram-tools";
 
-/** Enough for search → schema → execute plus a summary; a cap keeps calls snappy. */
-const MAX_STEPS = 9;
+/** Enough for search -> schema -> execute plus repeats and a summary. A model that
+ * searches more than once would otherwise starve the loop of the step it needs to
+ * answer, and the caller would hear the fallback. */
+const MAX_STEPS = 10;
 /** Tool output beyond this is noise for a spoken answer and slows the loop down. */
 const MAX_TOOL_CHARS = 6000;
 const MAX_ANSWER_CHARS = 1500;
