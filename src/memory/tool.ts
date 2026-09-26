@@ -37,8 +37,9 @@ export const MEMORY_TOOL: ToolSchema = {
       "how they want things done) and workflow/ (saved procedures for multi-step jobs, some with a run_code program). " +
       "Relevant memory is already given to you at the top of the request; use this tool when you need more. " +
       "search: find memory by meaning. read: one node by path. list: the children of a folder (use 'personal' or " +
-      "'workflow' for a root). save: write a skill when the caller tells you to remember something, at a path like " +
-      "personal/relationships/family/priya with plain-sentence content. forget: remove a node when the caller asks.",
+      "'workflow' for a root). save: write a skill — use this the moment you learn how to reach someone " +
+      "(personal/relationships/contacts/himanshu) or when the caller tells you to remember something. " +
+      "forget: remove a node when the caller asks.",
     parameters: {
       type: "object",
       properties: {
@@ -57,7 +58,11 @@ export const MEMORY_TOOL: ToolSchema = {
 };
 
 export const MEMORY_GUIDANCE = `## Memory
-Relevant long-term memory, when there is any, is given at the top of the request under "What you remember". Treat it as true unless the caller corrects it, and use it without asking again: a name in memory with a handle is who to message, a saved workflow is how to do the job. When a saved workflow carries a program, fill in its inputs and run it with run_code rather than working the steps out again; if it fails, do the job the ordinary way. When the caller tells you to remember or forget something, do it with the memory tool right away and say so. Memory is also updated automatically after each conversation, so do not save things they merely mentioned in passing.`;
+Relevant long-term memory, when there is any, is given at the top of the request under "What you remember". Treat it as true unless the caller corrects it, and use it without asking again: a name in memory with an email or handle is who to message or share with, a saved workflow is how to do the job. When a saved workflow carries a program, fill in its inputs and run it with run_code rather than working the steps out again; if it fails, do the job the ordinary way.
+
+When you learn how to reach someone — an email, a phone number, or a handle — even if they only said it so you could finish a job, save that person to personal memory with the memory tool in the same turn, after the action succeeds. Path like personal/relationships/contacts/himanshu. Content is who they are if you know, and every way to reach them, using the exact spelling the tool used. Next time the name alone should be enough: look them up before asking for the email again.
+
+When the caller tells you to remember or forget something else, do that with the memory tool right away and say so. Do not save small talk or one-off amounts. Do save people and how to reach them.`;
 
 export class MemoryToolbox {
   constructor(private readonly memory: MemoryActions) {}

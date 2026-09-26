@@ -9,6 +9,7 @@
  */
 
 import assert from "node:assert/strict";
+import { findContacts } from "../src/memory/contacts";
 import { consolidate, WRITE_CONFIDENCE } from "../src/memory/consolidate";
 import { parseAnswers, type JevAnswer, type JevClient, type JevQuestion } from "../src/memory/jev";
 import { renderBrief, renderOutline } from "../src/memory/outline";
@@ -57,6 +58,20 @@ check("normalizePath keeps only paths under a root, at a sane depth", () => {
   // The branch pins the root: a workflow path cannot be filed as personal.
   assert.equal(normalizePath("workflow/docs/send", "personal"), null);
   assert.equal(normalizePath("personal/travel", "personal"), "personal/travel");
+});
+
+check("findContacts pairs a spoken name with the address the tools used", () => {
+  const found = findContacts(
+    "Caller: Share it with uh Himanshu. Yeah, email is Himanshu Sharma four nine two X at gmail dot com",
+    "GOOGLESUPER_CREATE_PERMISSION email_address=HimanshuSharma492X@gmail.com",
+  );
+  assert.deepEqual(found, [{ name: "Himanshu", email: "himanshusharma492x@gmail.com" }]);
+});
+
+check("findContacts reads a spoken address when the tools did not spell it", () => {
+  const found = findContacts("Caller: send it to pandaHD75 at gmail dot com", null);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].email, "pandahd75@gmail.com");
 });
 
 check("parentOf, ancestorsOf and titleFromSlug", () => {
@@ -268,7 +283,10 @@ function fakeWriteRepo(nodes: MemoryNode[]) {
     upsert: async (input: { path: string; content: string }) => {
       writes.push(input.path);
       const before = nodes.find((n) => n.path === input.path) ?? null;
-      return { before, after: node({ path: input.path, kind: "skill", content: input.content, version: (before?.version ?? 0) + 1 }), created: !before };
+      const after = node({ path: input.path, kind: "skill", content: input.content, version: (before?.version ?? 0) + 1 });
+      if (before) Object.assign(before, after);
+      else nodes.push(after);
+      return { before, after, created: !before };
     },
     remove: async (_userId: string, path: string) => {
       const gone = nodes.filter((n) => n.path === path || n.path.startsWith(`${path}/`));
@@ -281,17 +299,23 @@ function fakeWriteRepo(nodes: MemoryNode[]) {
   };
 }
 
-check("consolidate writes nothing when Jev routes none or is under the bar", async () => {
-  for (const [choice, confidence] of [["none", 0.9], ["personal", WRITE_CONFIDENCE]] as const) {
+/** Jev's answer to the write pass: one probability per branch. */
+function saveNouls(personal: number, workflow: number): Record<string, JevAnswer> {
+  return { personal: { type: "noul", noul: personal }, workflow: { type: "noul", noul: workflow } };
+}
+
+check("consolidate writes nothing when Jev says no to both, or is only at the bar", async () => {
+  for (const [personal, workflow] of [[0.1, 0.05], [WRITE_CONFIDENCE, 0.2]] as const) {
     const repo = fakeWriteRepo(TREE);
     let writerCalls = 0;
     const writer: Writer = async () => {
       writerCalls++;
       return { operations: [], note: "" };
     };
-    const jev = scriptedJev([() => ({ route: { type: "choice", choice, confidence, probabilities: {} } })]);
+    const jev = scriptedJev([() => saveNouls(personal, workflow)]);
     const result = await consolidate({ repo, jev, writer, userId: "u1" }, { source: "call", conversation: "Caller: hi there", work: null });
-    assert.equal(result.applied.length, 0, `${choice}@${confidence}`);
+    assert.equal(result.route, "none");
+    assert.equal(result.applied.length, 0, `${personal}/${workflow}`);
     assert.equal(writerCalls, 0);
     assert.equal(repo.logged.filter((e) => e.op === "route").length, 1);
   }
@@ -311,7 +335,7 @@ check("consolidate applies the writer's plan for the branch Jev chose, and logs 
       ],
     };
   };
-  const jev = scriptedJev([() => ({ route: { type: "choice", choice: "personal", confidence: 0.92, probabilities: {} } })]);
+  const jev = scriptedJev([() => saveNouls(0.92, 0.1)]);
 
   const result = await consolidate({ repo, jev, writer, userId: "u1" }, { source: "call", conversation: "Caller: my sister Priya moved to Boston", work: null });
   assert.deepEqual(seen, ["personal"]);
@@ -331,12 +355,61 @@ check("a new skill that Jev says is the same as an existing one lands on the exi
     ],
   });
   const jev = scriptedJev([
-    () => ({ route: { type: "choice", choice: "personal", confidence: 0.9, probabilities: {} } }),
+    () => saveNouls(0.9, 0.05),
     () => ({ same: { type: "choice", choice: "e0", confidence: 0.85, probabilities: {} } }),
   ]);
   const result = await consolidate({ repo, jev, writer, userId: "u1" }, { source: "call", conversation: "Caller: my sister prefers WhatsApp", work: null });
   assert.deepEqual(repo.writes, ["personal/relationships/family/priya"]);
   assert.match(result.applied[0], /merged from personal\/people\/sister/);
+});
+
+check("a job done for someone new writes both the workflow and the person", async () => {
+  const repo = fakeWriteRepo([]);
+  const seen: string[] = [];
+  const writer: Writer = async (input) => {
+    seen.push(input.branch);
+    const person = { op: "upsert" as const, path: "personal/relationships/contacts/himanshu", kind: "skill" as const, title: "Himanshu", summary: "Contact", content: "Himanshu Sharma. Email: himanshusharma492x@gmail.com.", code: null, inputs: [], tools: [], reason: "" };
+    const job = { op: "upsert" as const, path: "workflow/google-docs/create-and-share", kind: "skill" as const, title: "Create and share a doc", summary: "", content: "Create the doc, then share it with the recipient's email from personal memory.", code: null, inputs: ["title", "recipient_email"], tools: [], reason: "" };
+    return { note: "", operations: [input.branch === "personal" ? person : job] };
+  };
+  const jev = scriptedJev([() => saveNouls(0.8, 0.85)]);
+  const result = await consolidate(
+    { repo, jev, writer, userId: "u1" },
+    { source: "call", conversation: "Caller: share it with Himanshu, his email is himanshusharma492x@gmail.com", work: "GOOGLESUPER_CREATE_PERMISSION ok" },
+  );
+  assert.equal(result.route, "both");
+  assert.deepEqual(seen, ["personal", "workflow"]);
+  assert.deepEqual(repo.writes, ["personal/relationships/contacts/himanshu", "workflow/google-docs/create-and-share"]);
+});
+
+check("a name plus an email is kept even when Jev calls the turn only a job", async () => {
+  const repo = fakeWriteRepo([]);
+  const seen: string[] = [];
+  const writer: Writer = async (input) => {
+    seen.push(input.branch);
+    if (input.branch === "workflow") {
+      return {
+        note: "",
+        operations: [
+          { op: "upsert", path: "workflow/google-docs/create-and-share", kind: "skill", title: "Create and share", summary: "", content: "Create the doc, then share it with the recipient from personal memory.", code: null, inputs: ["title", "recipient_email"], tools: [], reason: "" },
+        ],
+      };
+    }
+    return { note: "", operations: [] };
+  };
+  const jev = scriptedJev([() => saveNouls(0.1, 0.9)]);
+  const result = await consolidate(
+    { repo, jev, writer, userId: "u1" },
+    {
+      source: "call",
+      conversation: "Caller: share it with Himanshu, email is Himanshu Sharma four nine two X at gmail dot com",
+      work: "GOOGLESUPER_CREATE_PERMISSION email_address=HimanshuSharma492X@gmail.com",
+    },
+  );
+  assert.equal(result.route, "both");
+  assert.deepEqual(seen.sort(), ["personal", "workflow"]);
+  assert.ok(repo.writes.includes("workflow/google-docs/create-and-share"));
+  assert.ok(repo.writes.includes("personal/relationships/contacts/himanshu"), `writes: ${repo.writes.join(",")}`);
 });
 
 await Promise.all(checks);

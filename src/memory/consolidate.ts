@@ -1,18 +1,19 @@
 /**
  * Writing memory: what a conversation leaves behind.
  *
- * Runs after the work, never in the caller's way. Jev makes the first call —
- * does this change personal memory, workflow memory, both, or nothing — and a
- * confidence at or under the bar means nothing. For each branch it picked, the
+ * Runs after the work, never in the caller's way. Jev makes the first call,
+ * one yes/no per branch — is there a personal fact worth keeping, is there a
+ * reusable procedure — and a branch at or under the bar is left alone. For each branch it picked, the
  * writer model plans upserts and deletes against the branch's outline. Before
  * a new node is created, Vector Search looks for one that already means the
  * same thing and Jev says whether it is the same; if so the write lands there
  * instead, so the tree does not grow twins. Every step is logged.
  */
 
-import { choiceOf, type JevClient } from "./jev";
+import { contactContent, contactPath, findContacts, type FoundContact } from "./contacts";
+import { choiceOf, noulOf, type JevClient } from "./jev";
 import { renderOutline } from "./outline";
-import { type Branch, BRANCHES } from "./paths";
+import { slugify, type Branch, BRANCHES } from "./paths";
 import type { MemoryNode, MemoryRepo } from "./repo";
 import type { WriteOp, Writer } from "./writer";
 
@@ -52,41 +53,66 @@ export async function consolidate(deps: ConsolidateDeps, input: ConsolidateInput
   const work = input.work?.trim().slice(-WORK_CHARS) || null;
   if (!conversation && !work) return { route: "none", confidence: 1, applied: [], skipped: ["nothing to read"] };
 
+  // Two independent questions, not one four-way choice: a job done for someone
+  // new is both a procedure and a person, and a single pick files it as one.
   const routed = await deps.jev(
     { conversation, work_record: work ?? "(no tools were used)" },
     {
-      route: {
-        type: "choice",
+      personal: {
+        type: "noul",
         instructions:
-          "Did this conversation reveal something worth keeping in the assistant's long-term memory of this caller? " +
-          "Personal memory: durable facts about the caller's life — people, places, preferences, routines, how they want things done. " +
-          "Workflow memory: a reusable procedure — a multi-step job done with their apps in `work_record`, or an instruction about how such jobs should be done in future.",
+          "This conversation contains a durable fact about the caller's life worth remembering next time: someone they named together with how to reach them " +
+          "(an email address, phone number or handle, even one given only so a task could be done), who a person is to them, where they live or travel, " +
+          "what they like, or how they want things done. A name the caller will use again, paired with its contact detail, always counts.",
         criteria: {
-          none: "Nothing durable: small talk, a one-off question answered from live data, a single simple action, or facts the assistant already had.",
-          personal: "The caller stated or corrected a durable fact about their life or preferences, and no reusable multi-step procedure happened.",
-          workflow: "A multi-step job with tools was completed, or the caller said how a kind of job should be done from now on, with no new personal fact.",
-          both: "Both a durable personal fact and a reusable procedure or standing instruction came up.",
+          true: "At least one such fact was said or confirmed, and it is not a secret, code or card number.",
+          false: "Nothing about the caller's people, places or preferences came up beyond what was already known; only small talk or task mechanics.",
+        },
+      },
+      workflow: {
+        type: "noul",
+        instructions:
+          "`work_record` shows a job with the caller's apps that took more than one dependent step and succeeded, or the caller said how a kind of job should be done from now on.",
+        criteria: {
+          true: "A reusable multi-step procedure or a standing instruction about how to do a kind of job.",
+          false: "No tools were used, a single simple action, a failed attempt, or a question answered from live data.",
         },
       },
     },
   );
-  const route = choiceOf(routed.answers, "route");
-  const choice = (route?.choice ?? "none") as WriteRoute;
-  const confidence = route?.confidence ?? 0;
+  const probabilities: Record<Branch, number> = {
+    personal: noulOf(routed.answers, "personal") ?? 0,
+    workflow: noulOf(routed.answers, "workflow") ?? 0,
+  };
+  const contacts = findContacts(conversation, work);
+  const branches = BRANCHES.filter((branch) => probabilities[branch] > WRITE_CONFIDENCE);
+  // A name plus how to reach them is always personal memory, even when Jev
+  // reads the turn as only a job (that is what happened with Himanshu).
+  const forced = contacts.length > 0 && !branches.includes("personal");
+  if (forced) branches.push("personal");
+  const choice: WriteRoute = branches.length === 2 ? "both" : branches[0] ?? "none";
+  const confidence = branches.length
+    ? Math.min(...branches.map((branch) => probabilities[branch] || (branch === "personal" && forced ? 1 : 0)))
+    : 1 - Math.max(probabilities.personal, probabilities.workflow);
 
   await deps.repo.log({
     userId: deps.userId,
     op: "route",
     source: input.source,
     path: null,
-    detail: { route: choice, confidence, probabilities: route?.probabilities ?? {}, costUsd: routed.costUsd },
+    detail: {
+      route: choice,
+      confidence,
+      probabilities,
+      forced,
+      contacts: contacts.map((contact) => ({ name: contact.name, email: contact.email })),
+      costUsd: routed.costUsd,
+    },
   });
 
-  if (choice === "none" || confidence <= WRITE_CONFIDENCE) {
-    return { route: choice, confidence, applied: [], skipped: [confidence <= WRITE_CONFIDENCE ? "route below confidence bar" : "nothing to keep"] };
+  if (!branches.length) {
+    return { route: "none", confidence, applied: [], skipped: ["nothing to keep"] };
   }
-
-  const branches: Branch[] = choice === "both" ? [...BRANCHES] : [choice];
   const applied: string[] = [];
   const skipped: string[] = [];
 
@@ -96,7 +122,7 @@ export async function consolidate(deps: ConsolidateDeps, input: ConsolidateInput
       branch,
       outline: renderOutline(nodes),
       conversation,
-      work: branch === "workflow" ? work : work?.slice(-2000) ?? null,
+      work: branch === "workflow" ? work : work?.slice(-4000) ?? null,
       existing: Object.fromEntries(
         nodes.filter((node) => node.kind === "skill" && node.content.length > 280).slice(0, 20).map((node) => [node.path, node.content]),
       ),
@@ -112,7 +138,62 @@ export async function consolidate(deps: ConsolidateDeps, input: ConsolidateInput
     }
   }
 
+  if (contacts.length) {
+    for (const outcome of await seedContacts(deps, contacts, input.source, confidence)) {
+      (outcome.applied ? applied : skipped).push(outcome.line);
+    }
+  }
+
   return { route: choice, confidence, applied, skipped };
+}
+
+/** Files any contact the writer did not, so a name+email cannot vanish. */
+async function seedContacts(
+  deps: ConsolidateDeps,
+  contacts: FoundContact[],
+  source: string,
+  routeConfidence: number,
+): Promise<{ applied: boolean; line: string }[]> {
+  const nodes = await deps.repo.all(deps.userId, "personal");
+  const outcomes: { applied: boolean; line: string }[] = [];
+  for (const contact of contacts) {
+    if (nodes.some((node) => node.kind === "skill" && node.content.toLowerCase().includes(contact.email))) {
+      continue;
+    }
+    const named = nodes.find(
+      (node) =>
+        node.kind === "skill" &&
+        (node.title.toLowerCase() === contact.name.toLowerCase() || node.path.endsWith(`/${slugify(contact.name)}`)),
+    );
+    const op: WriteOp = {
+      op: "upsert",
+      path: named?.path ?? contactPath(contact.name),
+      kind: "skill",
+      title: named?.title ?? contact.name,
+      summary: named?.summary || `${contact.name}'s contact`,
+      content: named ? mergeEmail(named.content, contact) : contactContent(contact),
+      code: null,
+      inputs: [],
+      tools: [],
+      reason: "named with a way to reach them",
+    };
+    try {
+      const outcome = await apply(deps, "personal", op, source, routeConfidence);
+      outcomes.push(outcome);
+      if (outcome.applied) {
+        const after = await deps.repo.get(deps.userId, op.path);
+        if (after) nodes.push(after);
+      }
+    } catch (error) {
+      outcomes.push({ applied: false, line: `upsert ${op.path}: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
+  return outcomes;
+}
+
+function mergeEmail(content: string, contact: FoundContact): string {
+  if (content.toLowerCase().includes(contact.email)) return content;
+  return `${content.trim()} Email: ${contact.email}.`;
 }
 
 async function apply(

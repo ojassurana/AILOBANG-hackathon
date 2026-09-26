@@ -147,8 +147,11 @@ const PERSONAL_PROMPT = `You keep the long-term personal memory of a voice assis
 
 What counts as personal memory: who the people in their life are and how to reach them (names, relationship, handles as said), where they live and travel, what they do, what they like and dislike, how they want things done for them (tone, length, defaults), routines, plans that recur, and preferences that would change how the assistant acts next time.
 
+Contact details matter most. Whenever the caller names someone and an email address, phone number or handle for them comes up — even only so a task could be done, like sharing a document or sending a message — keep that person with that detail, so next time the name alone is enough. Take the exact spelling from the work record when it has one (a spoken "four nine two X at gmail dot com" is the address the tool call used).
+
 ${SHARED_RULES}
-- Content is a few plain sentences in the third person ("The caller's sister Priya lives in Boston.").
+- Content is a few plain sentences in the third person ("The caller's sister Priya lives in Boston."). For a contact: who they are if known, and every way to reach them ("Himanshu Sharma. Email: himanshusharma492x@gmail.com. The caller shared a Google Doc with him.").
+- When only a name and a contact detail are known, the person still gets a skill; file them under relationships (in a contacts folder unless the relationship is clear).
 - One skill per person, place or topic. Put people under a relationships folder (family, friends, work), places under travel or home, habits under routines, taste under preferences, unless the outline already organises them another way.`;
 
 const WORKFLOW_PROMPT = `You keep the workflow memory of a voice assistant's backend, as a folder tree under "workflow/": reusable procedures for multi-step jobs it did with its tools, so the next time takes one step.
@@ -160,7 +163,8 @@ ${SHARED_RULES}
 - Content: the trigger (when to use it), the steps in order, the tool slugs, and what to watch out for (the shape of a result, an argument that must be exact).
 - "tools": the tool slugs used. "inputs": the values that change per run (recipient, title, dates, message text).
 - "code": when a run_code program did the job, return it rewritten as a template: the body of an async function that reads its inputs from an \`inputs\` object (inputs.recipient, inputs.title ...) and never hard-codes a name, link, id or message from this run. Keep the working calls exactly as they were made. Otherwise null.
-- Record what the caller said about how they want the task done as part of the content.`;
+- Record what the caller said about how they want the task done as part of the content.
+- A workflow is about the job, not the people in it. Never put a person's name, email, phone number or handle in a workflow, and never an example from this run; those belong to personal memory, which is kept separately. Where the job needs a recipient, the step reads "use the recipient's contact from personal memory; ask only if it is not there". When updating an existing workflow that contains such details, remove them.`;
 
 function userContent(input: WriterInput): string {
   const sections = [

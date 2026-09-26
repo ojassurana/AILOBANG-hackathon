@@ -65,9 +65,10 @@ when a call starts (`brief()`), so the voice knows the caller before hello.
 Runs in the background, after a delegation with tool work and when the call
 ends, and after each coding-chat turn. Never on the call's path.
 
-1. **Route.** One Jev `choice` over the conversation and the work record:
-   `none` / `personal` / `workflow` / `both`. At or under 50% confidence,
-   nothing is written. The decision is logged either way.
+1. **Route.** Two Jev yes/no questions: is there a person or preference worth
+   keeping, and is there a reusable job. At or under 50% a branch is skipped —
+   except a name plus an email, phone or handle, which is always personal
+   memory, even when Jev reads the turn as only a job.
 2. **Plan.** For each branch chosen, the writer model (through OpenRouter) sees
    the branch's outline and returns upserts and deletes as JSON. Every path is
    normalised and must sit under the branch root; malformed operations drop.
