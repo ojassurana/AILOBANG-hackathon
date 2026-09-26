@@ -17,6 +17,8 @@ import { CODE_GUIDANCE, CodeToolbox, RUN_CODE, RUN_CODE_TOOL } from "./code-tool
 import { chatWithTools, type ChatMessage, type ToolSchema } from "./deepseek";
 import { webSearch } from "./exa";
 import type { McpClient, McpTool } from "./mcp";
+import type { PlaidActions } from "./plaid";
+import { PlaidToolbox, plaidTools } from "./plaid-tools";
 import { TELEGRAM_TOOLS, TelegramToolbox, type TelegramActions } from "./telegram-tools";
 
 /** Enough for search -> schema -> execute plus repeats and a summary. A model that
@@ -32,6 +34,18 @@ const WORKLOG_ARGS_CHARS = 400;
 const WORKLOG_OUTPUT_CHARS = 1000;
 /** Discovery calls: what they returned is no use to a later request. */
 const UNLOGGED_TOOLS = new Set(["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS"]);
+
+/** Shared with the coding chat, which reaches the same banks. */
+export const BANK_GUIDANCE = `## Bank accounts (Plaid)
+The plaid_ tools read the bank, card and loan accounts the caller linked through
+Plaid. They are not in Composio, so never search Composio for banking; call
+them directly. plaid_list_accounts gives every account and its balance.
+plaid_transactions finds transactions between two dates, filtered by merchant,
+category or account, and adds up what was spent and received: answer "how much"
+questions from its totals, never by adding the listed rows. Both are read-only.
+Nothing can pay, transfer or move money, so say that if the caller asks. A bank
+the tools say needs signing in again is fixed from the Plaid row on the caller's
+accounts page.`;
 
 export const SYSTEM_PROMPT = `## Voice conversation context
 You are the backend for an assistant in a live voice call. You do not speak:
@@ -61,13 +75,16 @@ answer from that record.
 ## Connected accounts
 The tools below act on the caller's own connected accounts: Google (Gmail, Drive,
 Calendar, Sheets, Docs, Photos, Contacts, Tasks), Telegram, Reddit, LinkedIn,
-Slack, Notion, Discord, Google Maps and Cursor.
+Slack, Notion, Discord, Google Maps, Cursor, and the bank accounts they linked
+through Plaid.
 
 That list is what the tools can do, not what is connected. Which accounts are
 connected is only ever known from a tool's own answer: never tell the caller an
 account is or is not connected from memory, never list their connections without
 having asked, and when a tool reports that something is not connected, that
 report is the answer rather than a reason to guess.
+
+${BANK_GUIDANCE}
 
 ## Telegram
 The Telegram tools act on the caller's own Telegram account — not a bot, and not
@@ -138,6 +155,8 @@ const PROGRESS_NOTES: Record<string, string> = {
   telegram_find_contact: "Working out who you mean.",
   telegram_send: "Sending the Telegram message.",
   telegram_send_file: "Sending the file on Telegram.",
+  plaid_list_accounts: "Checking your bank balances.",
+  plaid_transactions: "Looking through your transactions.",
   [RUN_CODE]: "Working through that now.",
 };
 
@@ -174,6 +193,7 @@ export class ConnectorHarness {
   /** Null when the caller's Telegram object could not be reached at all. */
   private readonly telegram: TelegramToolbox | null;
   private readonly code: CodeToolbox | null;
+  private readonly plaid: PlaidToolbox;
   /**
    * What each earlier run on this harness did, one block per request.
    *
@@ -190,8 +210,10 @@ export class ConnectorHarness {
     private readonly userId: string,
     telegram: TelegramActions | null = null,
     executor: Executor | null = null,
+    plaid: PlaidActions | null = null,
   ) {
     this.telegram = telegram ? new TelegramToolbox(telegram) : null;
+    this.plaid = new PlaidToolbox(plaid);
     this.code = executor
       ? new CodeToolbox({
           executor,
@@ -219,6 +241,7 @@ export class ConnectorHarness {
     const schemas = [
       ...(this.mcpSchemas ?? []),
       ...(this.telegram ? TELEGRAM_TOOLS : []),
+      ...plaidTools(),
       WEB_SEARCH_TOOL,
       ...(this.code ? [RUN_CODE_TOOL] : []),
     ];
@@ -287,6 +310,8 @@ export class ConnectorHarness {
             output = await this.code.run(call.arguments);
           } else if (this.telegram?.handles(call.name)) {
             output = await this.telegram.run(call.name, call.arguments);
+          } else if (this.plaid.handles(call.name)) {
+            output = await this.plaid.run(call.name, call.arguments);
           } else {
             output = await this.mcpCall(call.name, call.arguments);
           }

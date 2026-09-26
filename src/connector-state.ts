@@ -160,6 +160,56 @@ export function telegramRowState(state: TelegramRowInput): ConnectorRowState {
   }
 }
 
+/** Just the parts of a linked bank the row reads. */
+export interface PlaidRowInput {
+  institutionName: string;
+  needsLogin: boolean;
+}
+
+/** How many bank names the row lists before it switches to "+N". */
+const PLAID_VISIBLE_BANKS = 2;
+
+/**
+ * The Plaid row. It stands for every bank the user linked, so it is connected
+ * while any is, and one bank asking to be signed in again turns the whole row
+ * red: the agent silently loses that bank's balances until it is fixed. The
+ * button opens the Plaid screen either way, where banks are added and fixed.
+ */
+export function plaidRowState(banks: readonly PlaidRowInput[]): ConnectorRowState {
+  if (!banks.length) {
+    return {
+      tone: null,
+      label: "Not connected",
+      actionKind: "connect",
+      actionLabel: "Connect",
+      canDisconnect: false,
+    };
+  }
+
+  const names = banks.slice(0, PLAID_VISIBLE_BANKS).map((bank) => bank.institutionName);
+  const hidden = banks.length - names.length;
+  const accountLabel = `${names.join(", ")}${hidden > 0 ? ` +${hidden}` : ""}`;
+
+  if (banks.some((bank) => bank.needsLogin)) {
+    return {
+      tone: "bad",
+      label: "Needs sign-in",
+      accountLabel,
+      actionKind: "resume",
+      actionLabel: "Fix",
+      canDisconnect: true,
+    };
+  }
+  return {
+    tone: "ok",
+    label: "Connected",
+    accountLabel,
+    actionKind: "reconnect",
+    actionLabel: "Manage",
+    canDisconnect: true,
+  };
+}
+
 /**
  * How many rows read as connected.
  *

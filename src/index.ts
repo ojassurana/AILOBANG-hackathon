@@ -22,6 +22,7 @@ import {
 import {
   composioRowState,
   connectedRowCount,
+  plaidRowState,
   telegramRowState,
   type ConnectorRowState,
 } from "./connector-state";
@@ -37,6 +38,20 @@ import {
 import { renderCallPage } from "./call-page";
 import { renderTelegramPage } from "./telegram-page";
 import type { TelegramStatus } from "./telegram";
+import {
+  PlaidApiError,
+  createLinkToken,
+  findBank,
+  linkBank,
+  listBanks,
+  markSignedIn,
+  plaidConfig,
+  removeAllBanks,
+  removeBank,
+  updateLinkToken,
+  type PlaidBank,
+} from "./plaid";
+import { renderPlaidPage, type PlaidPageOptions } from "./plaid-page";
 import type { Env } from "./env";
 import { calledNumber, incomingCall, verifyWebhook } from "./openai-webhook";
 import {
@@ -143,6 +158,13 @@ async function route(request: Request, env: Env): Promise<Response> {
     return telegramAction(request, env, path);
   }
 
+  // Plaid Link's calls back to the Worker, plus the Remove form. The screen is a
+  // GET and is handled in the switch below.
+  if (path.startsWith("/plaid/")) {
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return plaidAction(request, env, path);
+  }
+
   // OpenAI announces an incoming phone call here and waits for an accept.
   if (path === "/openai/webhook") {
     if (request.method !== "POST") return methodNotAllowed("POST");
@@ -181,6 +203,8 @@ async function route(request: Request, env: Env): Promise<Response> {
       return appPage(request, env);
     case "/telegram":
       return telegramScreen(request, env);
+    case "/plaid":
+      return plaidScreen(request, env);
     case "/call":
       return callPage(request, env);
     case "/phone":
@@ -359,9 +383,10 @@ async function appPage(request: Request, env: Env): Promise<Response> {
   if (!warning) await resolveMissingLabels(env, accounts);
 
   const telegram = await telegramStatus(env, session.sub);
+  const banks = await plaidBanksOrEmpty(env, session.sub);
   const phone = await phoneLinkOrNull(env, session.sub);
 
-  const html = renderConnectionsPage(session, accounts, telegram, phone, env.TELNYX_PHONE_NUMBER, {
+  const html = renderConnectionsPage(session, accounts, telegram, banks, phone, env.TELNYX_PHONE_NUMBER, {
     justConnected,
     justDisconnected,
     disconnectFailed,
@@ -674,6 +699,20 @@ async function disconnectToolkit(request: Request, env: Env, slug: string): Prom
     return seeOther(target.toString(), request);
   }
 
+  // Plaid's row is every bank the user linked; disconnecting it revokes them all.
+  if (connector.kind === "plaid") {
+    const config = plaidConfig(env);
+    try {
+      if (!config) throw new Error("plaid is not configured");
+      await removeAllBanks(config, env.DB, session.sub);
+      target.searchParams.set("disconnected", connector.slug);
+    } catch (error) {
+      console.error("plaid disconnect failed", error);
+      target.searchParams.set("disconnect_failed", connector.slug);
+    }
+    return seeOther(target.toString(), request);
+  }
+
   try {
     // A toolkit can hold more than one connection; disconnecting the app means
     // clearing all of them.
@@ -803,6 +842,119 @@ async function telegramAction(request: Request, env: Env, path: string): Promise
   return seeOther("/telegram", request);
 }
 
+/* -------------------------------------------------------------------- plaid */
+
+/** The user's linked banks, or none when they cannot be read. */
+async function plaidBanksOrEmpty(env: Env, userId: string): Promise<PlaidBank[]> {
+  try {
+    return await listBanks(env.DB, userId);
+  } catch (error) {
+    console.error("plaid bank lookup failed", error);
+    return [];
+  }
+}
+
+/** The bank screen, with a line about whatever the last action did. */
+async function plaidScreen(request: Request, env: Env): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  const config = plaidConfig(env);
+  const url = new URL(request.url);
+  const banks = config ? await plaidBanksOrEmpty(env, session.sub) : [];
+
+  // Item ids rather than names in the URL, so the line names what is stored
+  // instead of echoing whatever a link says.
+  const named = (param: string) => banks.find((bank) => bank.itemId === url.searchParams.get(param));
+  let notice: PlaidPageOptions["notice"] = null;
+  const linked = named("linked");
+  const fixed = named("fixed");
+  if (linked) notice = { tone: "ok", text: `${linked.institutionName} linked. Ask the agent about your balances or spending.` };
+  else if (fixed) notice = { tone: "ok", text: `${fixed.institutionName} is signed in again.` };
+  else if (url.searchParams.get("removed")) notice = { tone: "info", text: "Bank removed." };
+  else if (url.searchParams.get("remove_failed")) notice = { tone: "bad", text: "We couldn't remove that bank. Please try again." };
+
+  return new Response(
+    renderPlaidPage({
+      email: session.email,
+      userId: session.sub,
+      environment: config?.environment ?? null,
+      banks,
+      notice,
+    }),
+    { headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" } },
+  );
+}
+
+/**
+ * Plaid Link's three calls — a link token, the public token to exchange, and
+ * "signed back in" — answer JSON to the page's script. Remove is a plain form.
+ */
+async function plaidAction(request: Request, env: Env, path: string): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return json({ error: "Your session ended. Sign in again." }, 401);
+  if (crossOrigin(request)) return json({ error: "That request didn't come from this page." }, 403);
+
+  const config = plaidConfig(env);
+  if (!config) return json({ error: "Bank linking isn't switched on yet." }, 503);
+
+  if (path === "/plaid/remove") {
+    const form = await request.formData();
+    const target = new URL("/plaid", request.url);
+    try {
+      await removeBank(config, env.DB, session.sub, String(form.get("item_id") ?? ""));
+      target.searchParams.set("removed", "1");
+    } catch (error) {
+      console.error("plaid remove failed", error);
+      target.searchParams.set("remove_failed", "1");
+    }
+    return seeOther(target.toString(), request);
+  }
+
+  const body = (await request.json().catch(() => ({}))) as { itemId?: unknown; publicToken?: unknown };
+  const itemId = typeof body.itemId === "string" ? body.itemId : "";
+
+  try {
+    switch (path) {
+      case "/plaid/link-token": {
+        const linkToken = itemId
+          ? await updateLinkToken(config, env.DB, session.sub, itemId)
+          : await createLinkToken(config, session.sub);
+        if (!linkToken) return json({ error: "That bank isn't linked any more. Refresh the page." }, 404);
+        return json({ linkToken });
+      }
+      case "/plaid/exchange": {
+        if (typeof body.publicToken !== "string" || !body.publicToken) {
+          return json({ error: "Plaid didn't send anything to save. Please try again." }, 400);
+        }
+        const bank = await linkBank(config, env.DB, session.sub, body.publicToken);
+        return json({ itemId: bank.itemId });
+      }
+      case "/plaid/signed-in": {
+        const bank = (await findBank(env.DB, session.sub, itemId)) && (await markSignedIn(env.DB, session.sub, itemId));
+        if (!bank) return json({ error: "That bank isn't linked any more. Refresh the page." }, 404);
+        return json({ itemId: bank.itemId });
+      }
+      default:
+        return json({ error: "Not found" }, 404);
+    }
+  } catch (error) {
+    console.error("plaid action failed", path, error);
+    const message =
+      error instanceof PlaidApiError && error.displayMessage
+        ? error.displayMessage
+        : "Plaid couldn't finish that. Please try again.";
+    return json({ error: message }, 502);
+  }
+}
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
 /**
  * Whether a form post came from somewhere other than this site.
  *
@@ -852,6 +1004,7 @@ function renderConnectionsPage(
   session: Session,
   accounts: Map<string, ConnectedAccount>,
   telegram: TelegramStatus | null,
+  banks: PlaidBank[],
   phone: PhoneLink | null,
   callNumber: string,
   flash: {
@@ -862,12 +1015,12 @@ function renderConnectionsPage(
     warning: string | null;
   },
 ): string {
-  // Composio answers for every row but Telegram's, which is counted through the
-  // third argument so the header and the shelf cannot disagree.
+  // Composio answers for every row but Telegram's and Plaid's, which are counted
+  // through the third argument so the header and the shelf cannot disagree.
   const connected = connectedRowCount(
     CONNECTORS,
     (toolkit) => accounts.get(toolkit)?.status,
-    telegram?.phase === "connected" ? 1 : 0,
+    (telegram?.phase === "connected" ? 1 : 0) + (banks.length ? 1 : 0),
   );
 
   const googleAccount = accounts.get(GOOGLE_GROUP.toolkit);
@@ -914,7 +1067,9 @@ function renderConnectionsPage(
     .map((connector) =>
       connector.kind === "telegram"
         ? telegramConnectorRow(connector, telegram)
-        : connectorRow(connector, accounts.get(connector.toolkit)),
+        : connector.kind === "plaid"
+          ? rowMarkup(connector, plaidRowState(banks))
+          : connectorRow(connector, accounts.get(connector.toolkit)),
     )
     .join("\n");
   let banner = "";
@@ -1257,6 +1412,9 @@ function disconnectConfirmText(connector: Connector): string {
   if (connector.kind === "telegram") {
     return `Disconnect ${connector.name}? The agent will stop being able to send and read your messages.`;
   }
+  if (connector.kind === "plaid") {
+    return `Disconnect ${connector.name}? This unlinks every bank you added, and the agent will stop seeing their balances and transactions.`;
+  }
 
   const others = connectorsForToolkit(connector.toolkit).filter(
     (other) => other.slug !== connector.slug,
@@ -1296,7 +1454,8 @@ function telegramConnectorRow(connector: Connector, telegram: TelegramStatus | n
 function rowMarkup(connector: Connector, state: ConnectorRowState, insideGroup = false): string {
   // Only Composio rows have a hosted sign-in to open; a row that connects
   // another way owns its own screen.
-  const href = connector.kind === "telegram" ? "/telegram" : `/connect/${connector.slug}`;
+  const href =
+    connector.kind === "telegram" ? "/telegram" : connector.kind === "plaid" ? "/plaid" : `/connect/${connector.slug}`;
 
   const stateCell = state.tone
     ? `<span class="pill"><span class="dot ${state.tone}"></span>${escapeHtml(state.label)}</span>${

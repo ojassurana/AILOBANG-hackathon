@@ -59,7 +59,10 @@
     "TELNYX_PHONE_NUMBER": "+14073580773",
     // The Telnyx account and the TeXML app ("ailobang-phone-codes") that place code calls.
     "TELNYX_ACCOUNT_SID": "925b1346-e092-4517-b93b-b861b01c0dbf",
-    "TELNYX_TEXML_APP_ID": "3057630664552613184"
+    "TELNYX_TEXML_APP_ID": "3057630664552613184",
+    // Which Plaid environment the PLAID_CLIENT_ID / PLAID_SECRET secrets belong to:
+    // "sandbox" (test banks only) or "production" (real banks).
+    "PLAID_ENV": "sandbox"
   },
   "routes": [
     {

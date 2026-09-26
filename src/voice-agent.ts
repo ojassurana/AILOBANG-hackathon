@@ -27,6 +27,7 @@ import { DelegationQueue } from "./delegation-queue";
 import type { Env } from "./env";
 import { ConnectorHarness } from "./harness";
 import { McpClient } from "./mcp";
+import { PlaidBanks, plaidConfig } from "./plaid";
 
 /**
  * The Live session socket. Workers reach a WebSocket with a plain https fetch
@@ -544,6 +545,7 @@ export class VoiceAgent extends Agent<Env> {
     if (this.harness) return this.harness;
 
     const session = await this.toolRouterSession();
+    const plaid = plaidConfig(this.env);
     const harness = new ConnectorHarness(
       new McpClient(session.mcpUrl, this.env.COMPOSIO_API_KEY),
       this.env.DEEPSEEK_API_KEY,
@@ -553,6 +555,7 @@ export class VoiceAgent extends Agent<Env> {
       // the session id the cookie carries is the name of both.
       this.env.TELEGRAM_SESSION.get(this.env.TELEGRAM_SESSION.idFromName(this.name)),
       new DynamicWorkerExecutor({ loader: this.env.LOADER, timeout: CODE_TIMEOUT_MS }),
+      plaid ? new PlaidBanks(plaid, this.env.DB, this.name) : null,
     );
     await harness.warmUp();
 
@@ -609,7 +612,7 @@ function conversationPrompt(channel: "site" | "phone"): string {
 
 Tone: warm, brief, natural. Most replies are one or two sentences. Never read out markdown, lists or URLs.
 
-Backend tools: the backend can read and act on the caller's connected accounts — Google (Gmail, Drive, Calendar, Sheets, Docs, Photos, Contacts, Tasks), Telegram, Reddit, LinkedIn, Slack, Notion, Discord, Google Maps and Cursor. It can also search the live internet.
+Backend tools: the backend can read and act on the caller's connected accounts — Google (Gmail, Drive, Calendar, Sheets, Docs, Photos, Contacts, Tasks), Telegram, Reddit, LinkedIn, Slack, Notion, Discord, Google Maps, Cursor, and the bank accounts they linked through Plaid (balances and transactions, read-only). It can also search the live internet.
 
 That is what the backend is able to do, not a list of what is connected. Never say that an account is or is not connected, and never name what they have connected, from memory or from that list: the backend is the only thing that knows, so delegate and let its answer be what you say. Never tell the caller they have not connected something without having asked the backend in this call.
 

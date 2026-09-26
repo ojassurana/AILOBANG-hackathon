@@ -23,6 +23,9 @@ Live at **https://ailobang.com**
 | `GET /connect/<toolkit>` | Creates a Composio Connect Link for that toolkit and redirects to it |
 | `GET /connect/return/<toolkit>` | Composio's callback; returns the browser to `/app?connected=<toolkit>` |
 | `POST /disconnect/<toolkit>` | Disconnects that toolkit: deletes the user's Composio connection(s) for it |
+| `GET /plaid` | The bank screen: linked banks, and the button that opens Plaid Link |
+| `POST /plaid/link-token`, `/plaid/exchange`, `/plaid/signed-in` | JSON calls from that page's script: start Link (or update mode for one bank), save a newly linked bank, mark a bank signed back in |
+| `POST /plaid/remove` | Form post: revokes one bank at Plaid and deletes it |
 | `GET /auth/logout` | Ends the WorkOS session and clears the local cookie |
 
 `<toolkit>` is a connector's `slug`, or `google` for the shared Google group.
@@ -65,6 +68,11 @@ Secrets (set with `npx wrangler secret put <NAME>`):
 - `EXA_API_KEY` — Exa key, used by the harness for its built-in web search
 - `TELNYX_API_KEY` — Telnyx key, used to text phone-link codes from `TELNYX_PHONE_NUMBER`
 - `OPENAI_WEBHOOK_SECRET` — signing secret of the OpenAI project webhook for incoming phone calls
+- `PLAID_CLIENT_ID`, `PLAID_SECRET` — the app's Plaid keys (Plaid Dashboard → Developers → Keys),
+  for the environment `vars.PLAID_ENV` names (`sandbox` or `production`). Until both are set the
+  Plaid row opens a "not available yet" screen and the bank tools say bank linking isn't set up
+- `PLAID_TOKEN_KEY` — 32 random bytes, base64; stored Plaid access tokens are sealed under it.
+  Changing it makes every linked bank unreadable, so users would have to link again
 
 ## Phone calls
 
@@ -233,17 +241,33 @@ same Connect Link endpoint, same callback, same status and Disconnect handling. 
 resolution also still works, because Composio exposes Cursor's
 `get_current_user_endpoint` (`https://api.cursor.com/v0/me`) as the connection's test endpoint.
 
-**Plaid is custom too.** Composio has no `plaid` toolkit; the row uses `plaid_mcp`, Plaid's own
-MCP server, whose only scheme is dynamic client registration:
+**Plaid is not Composio.** Composio's only Plaid toolkit, `plaid_mcp`, signs a developer in to
+the Plaid Dashboard and reads their team's analytics, not anyone's bank, so it was tried and
+dropped. The Plaid row is Plaid's own integration instead (`src/plaid.ts`), run with the app's
+Plaid keys, so users need no Plaid account:
 
-```json
-{ "toolkit": { "slug": "plaid_mcp" }, "auth_config": { "type": "use_custom_auth", "authScheme": "DCR_OAUTH" } }
-```
+1. `/plaid` opens **Plaid Link** in the page. The user searches for their bank, signs in inside
+   Plaid's window (OAuth banks such as Chase open their own sign-in in a pop-up, which works on
+   desktop and mobile web without a redirect URI) and picks the accounts to share. The link
+   token asks for `transactions`, which brings accounts and balances with it, over 730 days, in
+   the US.
+2. Link hands the page a one-time public token; `/plaid/exchange` swaps it for the Item's access
+   token, reads the accounts and the institution's name, and stores them in `plaid_items`. The
+   access token is AES-GCM-sealed under `PLAID_TOKEN_KEY`, bound to the item and user ids, and
+   never reaches the page. Linking a bank that is already linked replaces the older Item, so no
+   balance or transaction is counted twice.
+3. When Plaid says a bank's login has lapsed (`ITEM_LOGIN_REQUIRED` and friends) the row turns red
+   and the bank gets a **Sign in again** button, which reopens Link in update mode on the same Item.
+4. **Remove** (one bank) and the row's **Disconnect** (all of them) call `/item/remove` before
+   deleting the row, so no live grant is left behind.
 
-No client id or secret is needed — Composio registers the OAuth client with Plaid itself. The
-user signs in to the Plaid Dashboard (scope `mcp:dashboard`), so this reaches a Plaid developer
-team's diagnostics and analytics (teams, Item debugging, Link conversion, usage), not the user's
-bank accounts. Its row slug is `plaid`, its toolkit `plaid_mcp`.
+The agent reads the banks through two harness tools in `src/plaid-tools.ts`:
+`plaid_list_accounts` (live balances where the bank offers them, else Plaid's last fetch) and
+`plaid_transactions` (a date range, filtered by merchant, category, account or direction, with
+the spent and received totals added up in code so a spoken total is the real sum). Both are
+read-only; nothing requested from Plaid can move money. In `sandbox` only Plaid's test banks
+work (`user_good` / `pass_good`); real banks need `PLAID_ENV` set to `production` with
+production keys, which Plaid issues once it approves the app for production access.
 
 The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
 `googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
@@ -318,6 +342,10 @@ instead of inserting duplicates.
 `migrations/0002_account_labels.sql` creates `account_labels`, a cache of resolved connector
 account labels keyed by Composio connection id (ids are never reused), so identity resolution
 costs one provider request per connection rather than one per page load.
+
+`migrations/0004_plaid_items.sql` creates `plaid_items`: one row per bank a user linked through
+Plaid, with the sealed access token, the institution, the accounts shared at link time, and a
+`needs_login` flag.
 
 ## Notes
 

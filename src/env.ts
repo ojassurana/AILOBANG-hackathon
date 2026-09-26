@@ -21,4 +21,13 @@ export interface Env extends Cloudflare.Env {
   TELNYX_API_KEY: string;
   /** The `whsec_` signing secret of the OpenAI webhook that announces phone calls. */
   OPENAI_WEBHOOK_SECRET: string;
+  /**
+   * The app's own Plaid keys, from the Plaid Dashboard, for the environment
+   * `PLAID_ENV` names. Optional: until they are set the Plaid row says bank
+   * linking isn't available rather than failing.
+   */
+  PLAID_CLIENT_ID?: string;
+  PLAID_SECRET?: string;
+  /** 32 random bytes, base64: the key the stored Plaid access tokens are sealed under. */
+  PLAID_TOKEN_KEY?: string;
 }

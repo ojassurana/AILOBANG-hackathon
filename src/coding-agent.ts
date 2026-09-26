@@ -10,8 +10,9 @@ import type { GenerateTextOnFinishCallback, ToolSet } from "ai";
 import { CODE_GUIDANCE, CODE_TIMEOUT_MS } from "./code-tool";
 import { createToolRouterSession } from "./composio";
 import type { Env } from "./env";
-import { ConnectorHarness } from "./harness";
+import { BANK_GUIDANCE, ConnectorHarness } from "./harness";
 import { McpClient } from "./mcp";
+import { PlaidBanks, plaidConfig } from "./plaid";
 
 const SITE_ORIGIN = "https://ailobang.com";
 const TOOL_ROUTER_KEY = "toolRouterSession";
@@ -24,13 +25,16 @@ there. You may use markdown and code fences. Do not pretend to be the voice call
 ## Connected accounts
 The tools below act on the caller's own connected accounts: Google (Gmail, Drive,
 Calendar, Sheets, Docs, Photos, Contacts, Tasks), Telegram, Reddit, LinkedIn,
-Slack, Notion, Discord, Google Maps and Cursor.
+Slack, Notion, Discord, Google Maps, Cursor, and the bank accounts they linked
+through Plaid.
 
 That list is what the tools can do, not what is connected. Which accounts are
 connected is only ever known from a tool's own answer: never tell the caller an
 account is or is not connected from memory, never list their connections without
 having asked, and when a tool reports that something is not connected, that
 report is the answer rather than a reason to guess.
+
+${BANK_GUIDANCE}
 
 ## Telegram
 The Telegram tools act on the caller's own Telegram account — not a bot, and not
@@ -94,6 +98,7 @@ export class CodingAgent extends AIChatAgent<Env> {
     if (this.harness) return this.harness;
 
     const session = await this.toolRouterSession();
+    const plaid = plaidConfig(this.env);
     const harness = new ConnectorHarness(
       new McpClient(session.mcpUrl, this.env.COMPOSIO_API_KEY),
       this.env.DEEPSEEK_API_KEY,
@@ -101,6 +106,7 @@ export class CodingAgent extends AIChatAgent<Env> {
       this.name,
       this.env.TELEGRAM_SESSION.get(this.env.TELEGRAM_SESSION.idFromName(this.name)),
       new DynamicWorkerExecutor({ loader: this.env.LOADER, timeout: CODE_TIMEOUT_MS }),
+      plaid ? new PlaidBanks(plaid, this.env.DB, this.name) : null,
     );
     await harness.warmUp();
     this.harness = harness;

@@ -4,7 +4,7 @@
  * Each entry needs an auth config in the Composio project the API key belongs to
  * (project "AiLobang"). Almost all are Composio-managed OAuth2, so the project
  * needs no OAuth apps of its own; the exception is Cursor, which Composio does
- * not manage — see its entry below.
+ * not manage — see its entry below. Telegram and Plaid are not Composio at all.
  *
  * `slug` names the row and appears in its URL. `toolkit` names the Composio
  * toolkit the connection actually lives under — the difference matters for the
@@ -15,7 +15,7 @@
  * underscore, while google_maps does.
  */
 /** How a row's connection is made. */
-export type ConnectorKind = "composio" | "telegram";
+export type ConnectorKind = "composio" | "telegram" | "plaid";
 
 export interface Connector {
   /** Row identity and URL segment. */
@@ -35,8 +35,8 @@ export interface Connector {
    */
   kind?: ConnectorKind;
   /**
-   * The toolkit the connected account is stored against. A Telegram row connects
-   * some other way but still carries one, because the helpers below use it to
+   * The toolkit the connected account is stored against. A Telegram or Plaid row
+   * connects some other way but still carries one, because the helpers below use it to
    * group rows — a row whose toolkit is undefined would collide with every other
    * such row.
    */
@@ -50,7 +50,7 @@ export type ComposioConnector = Connector & { authConfigId: string };
 
 /** Narrows to the rows whose connection Composio creates and stores. */
 export function isComposio(connector: Connector): connector is ComposioConnector {
-  return connector.kind !== "telegram" && typeof connector.authConfigId === "string";
+  return (connector.kind ?? "composio") === "composio" && typeof connector.authConfigId === "string";
 }
 
 /** Google Super: one consent for Drive, Gmail, Sheets, Docs, Calendar and more. */
@@ -295,21 +295,20 @@ export const CONNECTORS: Connector[] = [
     authConfigId: "ac_KvRPE8I581Gi",
   },
   {
-    // Composio has no `plaid` toolkit, only Plaid's own MCP server, which reads
-    // a Plaid developer team's dashboard rather than anyone's bank accounts. It
-    // is DCR_OAUTH, not Composio-managed, so the auth config is `use_custom_auth`
-    // and Composio registers the OAuth client itself on first connect.
+    // Not Composio: its only Plaid toolkit reads a Plaid developer's dashboard,
+    // not anyone's bank. This row is Plaid Link run by the app's own Plaid keys
+    // (`src/plaid.ts`), so a user picks their bank and signs in with no Plaid
+    // account of their own.
     slug: "plaid",
     name: "Plaid",
-    blurb: "Your Plaid developer dashboard",
+    blurb: "Your bank accounts, read-only",
     capabilities: [
-      "See the Plaid teams you belong to",
-      "Diagnose why a linked Item has stopped working",
-      "Pull Link conversion and error rates",
-      "Read product usage and API request volumes",
+      "Check balances across every bank and card you link",
+      "Find transactions by merchant, category or date",
+      "Add up what you spent or received over a period",
     ],
-    toolkit: "plaid_mcp",
-    authConfigId: "ac_UbD2U_5sRG_A",
+    kind: "plaid",
+    toolkit: "plaid",
   },
 ];
 
