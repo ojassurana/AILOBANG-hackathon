@@ -17,6 +17,11 @@
       "database_id": "6c540dce-93de-460c-852d-e1b306255fcd"
     }
   ],
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

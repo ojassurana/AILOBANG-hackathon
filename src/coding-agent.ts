@@ -5,7 +5,9 @@
  * DO + Exa as voice). It is not VoiceAgent and does not share ChatStore.
  */
 import { AIChatAgent } from "@cloudflare/ai-chat";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import type { GenerateTextOnFinishCallback, ToolSet } from "ai";
+import { CODE_GUIDANCE, CODE_TIMEOUT_MS } from "./code-tool";
 import { createToolRouterSession } from "./composio";
 import type { Env } from "./env";
 import { ConnectorHarness } from "./harness";
@@ -53,6 +55,8 @@ caller's own data.
 3. COMPOSIO_MULTI_EXECUTE_TOOL to run them.
 Never invent a tool slug. If the needed account is not connected, say so.
 
+${CODE_GUIDANCE}
+
 ## Return
 Lead with the answer. Use code blocks for code. Report only what tools confirmed.`;
 
@@ -96,6 +100,7 @@ export class CodingAgent extends AIChatAgent<Env> {
       this.env.EXA_API_KEY,
       this.name,
       this.env.TELEGRAM_SESSION.get(this.env.TELEGRAM_SESSION.idFromName(this.name)),
+      new DynamicWorkerExecutor({ loader: this.env.LOADER, timeout: CODE_TIMEOUT_MS }),
     );
     await harness.warmUp();
     this.harness = harness;

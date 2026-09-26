@@ -17,6 +17,8 @@ import {
   type ConnectionContext,
   type WSMessage,
 } from "agents";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { CODE_TIMEOUT_MS } from "./code-tool";
 import { createToolRouterSession } from "./composio";
 import { DelegationQueue } from "./delegation-queue";
 import type { Env } from "./env";
@@ -405,6 +407,7 @@ export class VoiceAgent extends Agent<Env> {
       // The caller's own Telegram object, under the same name this agent is:
       // the session id the cookie carries is the name of both.
       this.env.TELEGRAM_SESSION.get(this.env.TELEGRAM_SESSION.idFromName(this.name)),
+      new DynamicWorkerExecutor({ loader: this.env.LOADER, timeout: CODE_TIMEOUT_MS }),
     );
     await harness.warmUp();
 

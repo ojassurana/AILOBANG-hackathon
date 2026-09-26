@@ -12,6 +12,8 @@
  * hand back one short spoken-friendly answer.
  */
 
+import type { Executor } from "@cloudflare/codemode";
+import { CODE_GUIDANCE, CodeToolbox, RUN_CODE, RUN_CODE_TOOL } from "./code-tool";
 import { chatWithTools, type ChatMessage, type ToolSchema } from "./deepseek";
 import { webSearch } from "./exa";
 import type { McpClient, McpTool } from "./mcp";
@@ -88,6 +90,8 @@ question. If a search returns nothing useful, say so rather than guessing.
 Never invent a tool slug or an argument value you were not given. If the caller
 has not connected the account a request needs, say so plainly.
 
+${CODE_GUIDANCE}
+
 ## Return the result
 Answer in at most 60 words of plain conversational text, with no markdown, no
 lists and no URLs: it is read aloud by a voice model. Lead with the answer.
@@ -108,6 +112,7 @@ const PROGRESS_NOTES: Record<string, string> = {
   telegram_find_contact: "Working out who you mean.",
   telegram_prepare_send: "Writing that message.",
   telegram_confirm_send: "Sending that now.",
+  [RUN_CODE]: "Working through that now.",
 };
 
 /** Built in rather than exposed as a connector: the harness owns this capability. */
@@ -142,6 +147,7 @@ export class ConnectorHarness {
   private mcpSchemas: ToolSchema[] | null = null;
   /** Null when the caller's Telegram object could not be reached at all. */
   private readonly telegram: TelegramToolbox | null;
+  private readonly code: CodeToolbox | null;
 
   constructor(
     private readonly mcp: McpClient,
@@ -149,8 +155,17 @@ export class ConnectorHarness {
     private readonly exaKey: string,
     private readonly userId: string,
     telegram: TelegramActions | null = null,
+    executor: Executor | null = null,
   ) {
     this.telegram = telegram ? new TelegramToolbox(telegram) : null;
+    this.code = executor
+      ? new CodeToolbox({
+          executor,
+          mcp,
+          telegram,
+          webSearch: (query, numResults) => webSearch(exaKey, query, numResults),
+        })
+      : null;
   }
 
   /** Opens the MCP session and caches the tool list for later delegations. */
@@ -171,6 +186,7 @@ export class ConnectorHarness {
       ...(this.mcpSchemas ?? []),
       ...(this.telegram ? TELEGRAM_TOOLS : []),
       WEB_SEARCH_TOOL,
+      ...(this.code ? [RUN_CODE_TOOL] : []),
     ];
 
     const messages: ChatMessage[] = [
@@ -209,6 +225,8 @@ export class ConnectorHarness {
         try {
           if (call.name === WEB_SEARCH_TOOL.function.name) {
             output = await this.search(call.arguments);
+          } else if (call.name === RUN_CODE && this.code) {
+            output = await this.code.run(call.arguments);
           } else if (this.telegram?.handles(call.name)) {
             output = await this.telegram.run(call.name, call.arguments);
           } else {
@@ -220,6 +238,19 @@ export class ConnectorHarness {
 
         messages.push({ role: "tool", tool_call_id: call.id, content: truncate(output, MAX_TOOL_CHARS) });
       }
+    }
+
+    // Out of steps with the work possibly done: the tool results above are the
+    // record of it, and the caller must hear that rather than the fallback.
+    if (answer === null && steps.length) {
+      messages.push({
+        role: "user",
+        content:
+          "No more tool calls are possible. Answer now from the tool results above: say what was " +
+          "done and confirmed, and what was not.",
+      });
+      const reply = await chatWithTools(this.deepseekKey, messages, schemas, this.userId, "none");
+      answer = reply.content?.trim() || null;
     }
 
     return {

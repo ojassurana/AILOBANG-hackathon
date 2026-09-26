@@ -40,15 +40,18 @@ export async function chatWithTools(
   messages: ChatMessage[],
   tools: ToolSchema[],
   userId: string,
+  toolChoice: "auto" | "none" = "auto",
 ): Promise<ChatReply> {
   const body = JSON.stringify({
     model: DEEPSEEK_MODEL,
     messages,
     tools,
-    tool_choice: "auto",
+    tool_choice: toolChoice,
     thinking: { type: "disabled" },
     temperature: 0.2,
-    max_tokens: 1200,
+    // A run_code program is written inside the tool call's arguments, so this
+    // also caps how long a program can be before its JSON is cut off.
+    max_tokens: 4000,
     user_id: userId,
   });
 
