@@ -18,6 +18,7 @@ import {
   type WSMessage,
 } from "agents";
 import { createToolRouterSession } from "./composio";
+import { DelegationQueue } from "./delegation-queue";
 import type { Env } from "./env";
 import { ConnectorHarness } from "./harness";
 import { McpClient } from "./mcp";
@@ -38,6 +39,13 @@ const TRANSCRIPT_SETTLE_MS = 350;
 const CLOSE_TIMEOUT_MS = 15000;
 /** How long a session may take to report itself started before the call gives up. */
 const START_TIMEOUT_MS = 8000;
+/**
+ * How many routed requests may wait behind the one being answered.
+ *
+ * Past this the answers would arrive too late to be about anything the caller
+ * still remembers asking, and a short note is more use than the queue.
+ */
+const MAX_QUEUED_DELEGATIONS = 3;
 /** `WebSocket.readyState` for an open socket. */
 const OPEN = 1;
 
@@ -52,8 +60,10 @@ export class VoiceAgent extends Agent<Env> {
   private greeted = false;
   private transcript: TranscriptLine[] = [];
   private harness: ConnectorHarness | null = null;
-  /** One backend task at a time; a second delegation while busy is dropped. */
-  private busy = false;
+  /** Answers one delegation at a time, in the order they arrived. */
+  private readonly delegations = new DelegationQueue(MAX_QUEUED_DELEGATIONS, (error) =>
+    console.error("voice agent: delegation failed", error),
+  );
 
   async onConnect(connection: Connection, _context: ConnectionContext): Promise<void> {
     try {
@@ -190,7 +200,7 @@ export class VoiceAgent extends Agent<Env> {
         break;
 
       case "session.delegation.created":
-        void this.delegate(event);
+        this.delegate(event);
         break;
 
       case "session.usage.updated":
@@ -256,11 +266,40 @@ export class VoiceAgent extends Agent<Env> {
 
   /* ------------------------------------------------------------ delegation */
 
-  private async delegate(event: Record<string, any>): Promise<void> {
+  /**
+   * Queues one delegated request behind any that is still running.
+   *
+   * GPT-Live expects an answer to every delegation it creates, and it can create
+   * one while the backend is still on the last — the caller interrupts,
+   * corrects themselves, or asks the next thing. Letting the new one wait rather
+   * than dropping it is what keeps the caller from being met with silence; the
+   * transcript is cumulative, so a run that starts later still sees the answer to
+   * the earlier request and whatever the caller said over it.
+   */
+  private delegate(event: Record<string, any>): void {
     const delegationId = event.delegation?.id as string | undefined;
-    if (!delegationId || this.busy) return;
+    if (!delegationId) return;
 
-    this.busy = true;
+    const queued = this.delegations.add(() => this.answer(delegationId));
+    if (!queued) {
+      this.note(
+        delegationId,
+        "I'm still working through the last few things. Ask me again in a moment.",
+      );
+    }
+  }
+
+  /** Says something back about a delegation without running the backend. */
+  private note(delegationId: string, content: string): void {
+    this.sendLive({
+      type: "session.commentary.append",
+      event_id: `note_${Date.now()}`,
+      delegation_id: delegationId,
+      content,
+    });
+  }
+
+  private async answer(delegationId: string): Promise<void> {
     try {
       await sleep(TRANSCRIPT_SETTLE_MS);
       const transcript = this.transcriptText();
@@ -294,14 +333,7 @@ export class VoiceAgent extends Agent<Env> {
     } catch (error) {
       console.error("voice agent: harness failed", error);
       this.broadcast(JSON.stringify({ type: "error", message: "The connector lookup failed." }));
-      this.sendLive({
-        type: "session.commentary.append",
-        event_id: `failed_${Date.now()}`,
-        delegation_id: delegationId,
-        content: "I couldn't reach the connected accounts just now. Please try that again.",
-      });
-    } finally {
-      this.busy = false;
+      this.note(delegationId, "I couldn't reach the connected accounts just now. Please try that again.");
     }
   }
 
@@ -314,6 +346,9 @@ export class VoiceAgent extends Agent<Env> {
       this.env.DEEPSEEK_API_KEY,
       this.env.EXA_API_KEY,
       this.name,
+      // The caller's own Telegram object, under the same name this agent is:
+      // the session id the cookie carries is the name of both.
+      this.env.TELEGRAM_SESSION.get(this.env.TELEGRAM_SESSION.idFromName(this.name)),
     );
     await harness.warmUp();
 
@@ -365,7 +400,9 @@ function conversationPrompt(): string {
 
 Tone: warm, brief, natural. Most replies are one or two sentences. Never read out markdown, lists or URLs.
 
-Backend tools: the backend can read and act on the caller's connected accounts — Google (Gmail, Drive, Calendar, Sheets, Docs, Photos, Contacts, Tasks), Reddit, LinkedIn, Slack, Notion, Discord, Google Maps and Cursor. It can also search the live internet.
+Backend tools: the backend can read and act on the caller's connected accounts — Google (Gmail, Drive, Calendar, Sheets, Docs, Photos, Contacts, Tasks), Telegram, Reddit, LinkedIn, Slack, Notion, Discord, Google Maps and Cursor. It can also search the live internet.
+
+That is what the backend is able to do, not a list of what is connected. Never say that an account is or is not connected, and never name what they have connected, from memory or from that list: the backend is the only thing that knows, so delegate and let its answer be what you say. Never tell the caller they have not connected something without having asked the backend in this call.
 
 Delegate to the backend when:
 - the request needs data from, or an action on, one of those accounts;

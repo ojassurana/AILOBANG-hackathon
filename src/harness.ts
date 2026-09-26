@@ -22,6 +22,7 @@ import { webSearch } from "./exa";
 import { detectAi, isScoreable } from "./detector";
 import { humanizePass, strategyFor } from "./humanize";
 import type { McpClient, McpTool } from "./mcp";
+import { TELEGRAM_TOOLS, TelegramToolbox, type TelegramActions } from "./telegram-tools";
 
 /** Enough for search → schema → execute plus a summary; a cap keeps calls snappy. */
 const MAX_STEPS = 9;
@@ -40,8 +41,32 @@ which detail you still need instead of guessing.
 
 ## Connected accounts
 The tools below act on the caller's own connected accounts: Google (Gmail, Drive,
-Calendar, Sheets, Docs, Photos, Contacts, Tasks), Reddit, LinkedIn, Slack, Notion,
-Discord, Google Maps and Cursor.
+Calendar, Sheets, Docs, Photos, Contacts, Tasks), Telegram, Reddit, LinkedIn,
+Slack, Notion, Discord, Google Maps and Cursor.
+
+That list is what the tools can do, not what is connected. Which accounts are
+connected is only ever known from a tool's own answer: never tell the caller an
+account is or is not connected from memory, never list their connections without
+having asked, and when a tool reports that something is not connected, that
+report is the answer rather than a reason to guess.
+
+## Telegram
+The Telegram tools act on the caller's own Telegram account — not a bot, and not
+through Composio, so Composio has no Telegram toolkit and searching it for one
+finds nothing. Use these tools directly for anything about Telegram.
+
+Reading is forward-only. telegram_list_chats shows the chats with something in
+them since they connected and telegram_read_messages reads one of them. Nothing
+from before the connection exists, so say that rather than implying a longer
+history.
+
+Sending takes two calls and both are required:
+1. telegram_prepare_send with the person's @username and the exact text. It stores
+   the message and returns it. Nothing has been sent yet.
+2. Read it back to the caller and ask them to confirm. Only after they say yes,
+   call telegram_confirm_send, which takes no arguments and sends exactly what was
+   prepared. A caller who changes the wording needs it prepared again first.
+Say a message was sent only when telegram_confirm_send says it was.
 
 ## Web search
 web_search looks things up on the live internet. Use it for anything about the
@@ -99,6 +124,10 @@ const PROGRESS_NOTES: Record<string, string> = {
   COMPOSIO_REMOTE_WORKBENCH: "Working through that now.",
   COMPOSIO_REMOTE_BASH_TOOL: "Working through that now.",
   COMPOSIO_MANAGE_CONNECTIONS: "Checking your connections.",
+  telegram_list_chats: "Looking through your Telegram.",
+  telegram_read_messages: "Reading your Telegram messages.",
+  telegram_prepare_send: "Writing that message.",
+  telegram_confirm_send: "Sending that now.",
 };
 
 /** Built in rather than exposed as a connector: the harness owns this capability. */
@@ -158,13 +187,18 @@ export interface HarnessResult {
 
 export class ConnectorHarness {
   private mcpSchemas: ToolSchema[] | null = null;
+  /** Null when the caller's Telegram object could not be reached at all. */
+  private readonly telegram: TelegramToolbox | null;
 
   constructor(
     private readonly mcp: McpClient,
     private readonly deepseekKey: string,
     private readonly exaKey: string,
     private readonly userId: string,
-  ) {}
+    telegram: TelegramActions | null = null,
+  ) {
+    this.telegram = telegram ? new TelegramToolbox(telegram) : null;
+  }
 
   /** Opens the MCP session and caches the tool list for later delegations. */
   async warmUp(): Promise<void> {
@@ -175,7 +209,12 @@ export class ConnectorHarness {
 
   async run(transcript: string, onProgress: (note: string) => void): Promise<HarnessResult> {
     await this.warmUp();
-    const schemas = [...(this.mcpSchemas ?? []), WEB_SEARCH_TOOL, HUMANIZE_TOOL];
+    const schemas = [
+      ...(this.mcpSchemas ?? []),
+      ...(this.telegram ? TELEGRAM_TOOLS : []),
+      WEB_SEARCH_TOOL,
+      HUMANIZE_TOOL,
+    ];
 
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
@@ -214,6 +253,8 @@ export class ConnectorHarness {
             output = await this.search(call.arguments);
           } else if (call.name === HUMANIZE_TOOL.function.name) {
             output = await this.humanizeAndCheck(call.arguments, onProgress);
+          } else if (this.telegram?.handles(call.name)) {
+            output = await this.telegram.run(call.name, call.arguments);
           } else {
             output = await this.mcpCall(call.name, call.arguments);
           }
