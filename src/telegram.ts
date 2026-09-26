@@ -608,7 +608,11 @@ export class TelegramSession extends DurableObject<Env> {
       });
 
       const username = me.user?.username ?? null;
-      this.writeLogin(loginConnected(Date.now()), {
+      // The number the user typed, or the one Telegram reports for its own
+      // account when the login never kept it — an account with no @username is
+      // otherwise left with nothing to identify it by.
+      const phone = this.loginState().phone ?? me.user?.phone ?? null;
+      this.writeLogin(loginConnected(Date.now(), phone), {
         session: session ?? this.liveSessionString(),
         username,
       });
@@ -664,6 +668,7 @@ export class TelegramSession extends DurableObject<Env> {
 
     try {
       await this.withClient(async (client) => {
+        await this.refillIdentity(client);
         for (let page = 0; page < MAX_DIFFERENCE_PAGES; page++) {
           const difference = await client.invoke(
             new Api.updates.GetDifference({ pts, qts, date }),
@@ -711,6 +716,31 @@ export class TelegramSession extends DurableObject<Env> {
   private resync(pts: number): void {
     const row = this.readUpdatesState();
     this.writeUpdatesState({ pts, qts: row?.qts ?? 0, date: row?.date ?? 0 });
+  }
+
+  /**
+   * Fills in a missing identifier on the stored login, using the one moment a
+   * connection is already open.
+   *
+   * A login that finished before the phone was kept has a session but nothing to
+   * name it by, which is what the connected row and the step screen show. Asking
+   * mid-sync repairs it without a socket of its own. Telegram sends a number only
+   * for the caller's own account, so a call that comes back without one is not a
+   * failure: the row simply keeps showing what it already has.
+   */
+  private async refillIdentity(client: TelegramClient): Promise<void> {
+    const row = this.readLogin();
+    if (row.phone && row.username) return;
+
+    try {
+      const me = await client.getMe();
+      const username = me.username ?? row.username;
+      const phone = row.phone ?? me.phone ?? null;
+      if (username === row.username && phone === row.phone) return;
+      this.writeLogin({ ...this.loginState(), phone }, { username });
+    } catch (error) {
+      console.error("telegram: could not read the account's own identity", error);
+    }
   }
 
   /**

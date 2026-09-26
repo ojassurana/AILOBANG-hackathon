@@ -96,8 +96,16 @@ export function passwordNeeded(state: TelegramLoginState): TelegramLoginState {
   return { ...state, phase: "password", error: null };
 }
 
-export function loginConnected(now: number): TelegramLoginState {
-  return { ...idleLoginState(), phase: "connected", codeSentAt: now };
+/**
+ * A finished login.
+ *
+ * The phone number survives it, unlike the rest of the login: it is the only
+ * name we have for an account with no @username, and the connected row and the
+ * step screen both identify the session by it. Clearing it here is what made
+ * both say "Connected" followed by nothing.
+ */
+export function loginConnected(now: number, phone: string | null = null): TelegramLoginState {
+  return { ...idleLoginState(), phase: "connected", phone, codeSentAt: now };
 }
 
 /**

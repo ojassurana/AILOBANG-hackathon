@@ -91,6 +91,8 @@ export interface TelegramRowInput {
   phase: TelegramPhase;
   phone: string | null;
   error: string | null;
+  /** The account's own @handle, which it may not have. */
+  username?: string | null;
 }
 
 /**
@@ -109,9 +111,11 @@ export function telegramRowState(state: TelegramRowInput): ConnectorRowState {
       return {
         tone: "ok",
         label: "Connected",
-        // The number, because that is what the user typed and will recognise;
-        // the account's @handle belongs on the step screen, which has room for it.
-        accountLabel: state.phone,
+        // Whichever of the two we have. The number is what the user typed and
+        // will recognise, so it wins; the @handle is the fallback for a session
+        // connected before the number was kept. A row with neither says only
+        // "Connected", which is why the connected screen carries the identity.
+        accountLabel: state.phone ?? (state.username ? `@${state.username}` : null),
         actionKind: "none",
         actionLabel: "",
         canDisconnect: true,

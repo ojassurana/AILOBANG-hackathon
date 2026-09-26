@@ -92,6 +92,21 @@ check("a connected account shows who is signed in and how to leave", () => {
   assert.doesNotMatch(html, /name="password"/);
 });
 
+check("a connected account with no @handle is named by its number", () => {
+  // Plenty of Telegram accounts have no username, so the number is the only
+  // name there is and the sentence still has to name something.
+  const html = screen({ phase: "connected", phone: "+15555550123", username: null });
+  assert.match(html, /<strong>\+15555550123<\/strong>/);
+});
+
+check("a connected account never leaves the identity sentence hanging", () => {
+  // This is the bug that was reported: with no username and no kept number the
+  // screen read "Signed in as ." — the sentence has to stand on its own.
+  const html = screen({ phase: "connected", phone: null, username: null });
+  assert.match(html, /Signed in to Telegram\./);
+  assert.doesNotMatch(html, /Signed in as\s*\./);
+});
+
 check("the stored error is the sentence shown", () => {
   const html = screen({ phase: "error", error: "That code wasn't right. Try again." });
   assert.match(html, /<p class="note bad">That code wasn&#39;t right\. Try again\.<\/p>/);

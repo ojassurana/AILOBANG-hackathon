@@ -95,6 +95,16 @@ check("connecting clears the error and the retry timer", () => {
   assert.equal(state.codeSentAt, 5000);
 });
 
+check("a finished login keeps the number that identifies the account", () => {
+  // Clearing it here is what left the connected row and the step screen showing
+  // "Connected" followed by nothing: an account with no @username has no other
+  // name, and the number is the only one we were ever given.
+  const state = loginConnected(5000, "+15555550123");
+  assert.equal(state.phase, "connected");
+  assert.equal(state.phone, "+15555550123");
+  assert.equal(state.phoneCodeHash, null);
+});
+
 check("a failure records the sentence and when retrying is possible", () => {
   const state = loginFailed(idleLoginState(), "Slow down.", 9000);
   assert.equal(state.phase, "error");

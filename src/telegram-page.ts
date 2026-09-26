@@ -168,6 +168,23 @@ function statusSubtitle(status: TelegramStatus): string {
     : "Sign in with your own account, not a bot.";
 }
 
+/**
+ * Which account the connection is, in the caller's terms.
+ *
+ * Either half can be missing: plenty of Telegram accounts have no @username, and
+ * a session connected before the number was kept has neither. The sentence has to
+ * read as complete in all three cases — it used to end at "Signed in as", which
+ * reads as a bug rather than as an answer.
+ */
+function signedInAs(status: TelegramStatus): string {
+  if (status.username && status.phone) {
+    return `Signed in as <strong>@${escapeHtml(status.username)}</strong> on ${escapeHtml(status.phone)}.`;
+  }
+  if (status.username) return `Signed in as <strong>@${escapeHtml(status.username)}</strong>.`;
+  if (status.phone) return `Signed in as <strong>${escapeHtml(status.phone)}</strong>.`;
+  return "Signed in to Telegram.";
+}
+
 function renderStep(status: TelegramStatus, notice: string | null): string {
   const error = notice ?? status.error;
 
@@ -211,11 +228,7 @@ function renderStep(status: TelegramStatus, notice: string | null): string {
     case "connected":
       return `
         <p class="step"><span class="pill"><span class="dot ok"></span>Connected</span></p>
-        <p class="lede">Signed in as ${
-          status.username ? `<strong>@${escapeHtml(status.username)}</strong>` : ""
-        }${
-          status.username && status.phone ? " on " : ""
-        }${status.phone ? escapeHtml(status.phone) : ""}.</p>
+        <p class="lede">${signedInAs(status)}</p>
         <p class="lede">Ask the agent to send a message to someone by their @username, or to read
         what has come in. Nothing from before you connected is read, and every send is read back to
         you for a yes first.</p>

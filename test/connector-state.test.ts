@@ -198,10 +198,17 @@ check("a Telegram row shows a phone number whenever it has one", () => {
     sent,
     passwordNeeded(sent),
     loginFailed(sent, "nope"),
-    { ...loginConnected(5000), phone: "+15555550123" },
+    loginConnected(5000, "+15555550123"),
   ]) {
     assert.equal(telegramRowState(state).accountLabel, "+15555550123");
   }
+});
+
+check("a connected row falls back to the @handle when there is no number", () => {
+  // A session connected before the number was kept still has to say which
+  // account it is; a blank label reads as a bug.
+  const row = telegramRowState({ ...loginConnected(5000), username: "someone" });
+  assert.equal(row.accountLabel, "@someone");
 });
 
 check("only a signed-in Telegram login offers Disconnect", () => {
