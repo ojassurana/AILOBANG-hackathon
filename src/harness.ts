@@ -61,12 +61,22 @@ from before the connection exists, so say that rather than implying a longer
 history.
 
 Sending takes two calls and both are required:
-1. telegram_prepare_send with the person's @username and the exact text. It stores
-   the message and returns it. Nothing has been sent yet.
+1. telegram_prepare_send with the person's name or @username, and the exact text.
+   It stores the message and returns the person it settled on. Nothing has been
+   sent yet.
 2. Read it back to the caller and ask them to confirm. Only after they say yes,
    call telegram_confirm_send, which takes no arguments and sends exactly what was
    prepared. A caller who changes the wording needs it prepared again first.
 Say a message was sent only when telegram_confirm_send says it was.
+
+The caller never has to spell out a handle. When they name a person — a first
+name, a nickname, a full name — call telegram_find_contact with the name as they
+said it and use what it returns. One match is that person. Several means the name
+is not enough on its own, so ask which they mean rather than choosing. A match
+with no @username cannot be messaged at all, and saying so is the answer. The
+handle telegram_prepare_send reports is the one the message will go to, so read
+it out along with the text. Never tell the caller a name was not found without
+having looked it up.
 
 ## Web search
 web_search looks things up on the live internet. Use it for anything about the
@@ -126,6 +136,7 @@ const PROGRESS_NOTES: Record<string, string> = {
   COMPOSIO_MANAGE_CONNECTIONS: "Checking your connections.",
   telegram_list_chats: "Looking through your Telegram.",
   telegram_read_messages: "Reading your Telegram messages.",
+  telegram_find_contact: "Working out who you mean.",
   telegram_prepare_send: "Writing that message.",
   telegram_confirm_send: "Sending that now.",
 };

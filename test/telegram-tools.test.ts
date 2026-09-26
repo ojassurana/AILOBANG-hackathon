@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import { TELEGRAM_TOOLS, TelegramToolbox, isTelegramTool, type TelegramActions } from "../src/telegram-tools";
 import type { ChatSummary, MessageLine, PrepareResult, SendResult, TelegramStatus } from "../src/telegram";
+import type { ContactCandidate } from "../src/telegram-contacts";
 
 let passed = 0;
 let failed = 0;
@@ -51,6 +52,7 @@ const CONNECTED: TelegramStatus = {
 interface Recorded {
   listChats: number[];
   readMessages: { chat: string; limit: number | undefined }[];
+  lookups: string[];
   prepared: { to: string; text: string }[];
   sends: number;
 }
@@ -59,10 +61,11 @@ function fake(options: {
   status?: Partial<TelegramStatus>;
   chats?: ChatSummary[];
   messages?: MessageLine[];
+  contacts?: ContactCandidate[];
   prepare?: Partial<PrepareResult>;
   send?: Partial<SendResult>;
 } = {}) {
-  const recorded: Recorded = { listChats: [], readMessages: [], prepared: [], sends: 0 };
+  const recorded: Recorded = { listChats: [], readMessages: [], lookups: [], prepared: [], sends: 0 };
 
   const telegram: TelegramActions = {
     async status() {
@@ -75,6 +78,10 @@ function fake(options: {
     async readMessages(chat: string, limit?: number) {
       recorded.readMessages.push({ chat, limit });
       return options.messages ?? [];
+    },
+    async findContacts(name: string) {
+      recorded.lookups.push(name);
+      return options.contacts ?? [];
     },
     async prepareSend(to: string, text: string) {
       recorded.prepared.push({ to, text });
@@ -109,6 +116,7 @@ check("every tool refuses to act without a connection, and says so", async () =>
     assert.deepEqual(recorded.prepared, []);
     assert.equal(recorded.sends, 0);
     assert.deepEqual(recorded.listChats, []);
+    assert.deepEqual(recorded.lookups, []);
   }
 });
 
@@ -184,6 +192,97 @@ check("a count from the model is held to what a spoken answer can carry", async 
   assert.equal(recorded.readMessages[0].limit, 1);
 });
 
+/* ---------------------------------------------------------------- finding */
+
+const found = (title: string, username: string | null, source: ContactCandidate["source"] = "chat"): ContactCandidate =>
+  ({ title, username, source });
+
+check("one match names the handle to send to, rather than guessing", async () => {
+  const { toolbox, recorded } = fake({ contacts: [found("Rahul Chacha", "@rahulchacha")] });
+  const answer = await toolbox.run("telegram_find_contact", '{"name":"Chacha"}');
+  assert.match(answer, /One person matches "Chacha"/);
+  assert.match(answer, /Rahul Chacha \(@rahulchacha\)/);
+  assert.match(answer, /Send to @rahulchacha/);
+  // The name is looked up as the caller said it, not tidied into a handle first.
+  assert.deepEqual(recorded.lookups, ["Chacha"]);
+});
+
+check("several matches become a question, never a choice", async () => {
+  const { toolbox } = fake({
+    contacts: [found("Rahul Chacha", "@rahulchacha"), found("Priya Chacha", "@priyachacha", "contacts")],
+  });
+  const answer = await toolbox.run("telegram_find_contact", '{"name":"chacha"}');
+  assert.match(answer, /Several people match "chacha"/);
+  assert.match(answer, /1\. Rahul Chacha \(@rahulchacha\)/);
+  assert.match(answer, /2\. Priya Chacha \(@priyachacha\)/);
+  assert.match(answer, /Ask the caller which one they mean/);
+  assert.match(answer, /do not pick one yourself/);
+});
+
+check("a name nobody matches is reported, with what to ask for instead", async () => {
+  const { toolbox } = fake({ contacts: [] });
+  const answer = await toolbox.run("telegram_find_contact", '{"name":"Chacha"}');
+  assert.match(answer, /Nobody in the caller's Telegram matches "Chacha"/);
+  assert.match(answer, /spell the @username/);
+});
+
+check("a person who cannot be messaged is reported as such, not dropped", async () => {
+  const { toolbox } = fake({ contacts: [found("Chacha", null)] });
+  const answer = await toolbox.run("telegram_find_contact", '{"name":"Chacha"}');
+  assert.match(answer, /One person matches "Chacha"/);
+  assert.match(answer, /no @username, so they cannot be messaged/);
+  assert.match(answer, /cannot be messaged: Telegram needs a handle/);
+  assert.doesNotMatch(answer, /Send to/);
+});
+
+check("a match says where it was found, so a stranger is not read as a friend", async () => {
+  const { toolbox } = fake({ contacts: [found("Chacha", "@chacha", "search")] });
+  const answer = await toolbox.run("telegram_find_contact", '{"name":"chacha"}');
+  assert.match(answer, /came up in Telegram search/);
+});
+
+check("finding needs a name to look up", async () => {
+  const { toolbox, recorded } = fake();
+  assert.match(await toolbox.run("telegram_find_contact", "{}"), /the name the caller said/);
+  assert.deepEqual(recorded.lookups, []);
+});
+
+check("a resolved name is what gets read back before anything is sent", async () => {
+  const { toolbox, recorded } = fake({
+    prepare: { ok: true, reason: null, to: "@rahulchacha", title: "Rahul Chacha", text: "On my way" },
+  });
+  const answer = await toolbox.run("telegram_prepare_send", '{"to":"Chacha","text":"On my way"}');
+  assert.match(answer, /To: Rahul Chacha \(@rahulchacha\)/);
+  // The name went through as spoken; resolving it is the object's job, not the
+  // tool's, so the handle in the answer is the one that will be sent to.
+  assert.deepEqual(recorded.prepared, [{ to: "Chacha", text: "On my way" }]);
+  assert.equal(recorded.sends, 0);
+});
+
+check("a refusal naming several people reaches the model with the candidates intact", async () => {
+  // What produces this string — one match or none, never a choice between two —
+  // is pinned in telegram-contacts.test.ts, where the rule lives. What matters
+  // here is that the sentence and the candidates survive the tool boundary, and
+  // that a refused preparation sends nothing.
+  const { toolbox, recorded } = fake({
+    prepare: {
+      ok: false,
+      reason:
+        "chacha could be 2 people: Rahul Chacha (@rahulchacha), Priya Chacha (@priyachacha). " +
+        "Ask the caller which one they mean, then prepare the message again with that person's @username.",
+      to: null,
+      title: null,
+      text: null,
+    },
+  });
+  const answer = await toolbox.run("telegram_prepare_send", '{"to":"chacha","text":"hi"}');
+  assert.match(answer, /could be 2 people/);
+  assert.match(answer, /@rahulchacha/);
+  assert.match(answer, /@priyachacha/);
+  assert.match(answer, /Ask the caller which one they mean/);
+  assert.equal(recorded.sends, 0);
+});
+
 /* ------------------------------------------------------------------ sending */
 
 check("preparing a message sends nothing and asks for a confirmation", async () => {
@@ -239,6 +338,7 @@ check("every tool is named and described for the model that has to choose it", (
   assert.deepEqual(names, [
     "telegram_list_chats",
     "telegram_read_messages",
+    "telegram_find_contact",
     "telegram_prepare_send",
     "telegram_confirm_send",
   ]);

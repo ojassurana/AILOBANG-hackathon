@@ -25,6 +25,12 @@ import { Api, TelegramClient, errors } from "teleproto";
 import { StringSession } from "teleproto/sessions";
 import type { Env } from "./env";
 import {
+  type ContactCandidate,
+  type NamedPerson,
+  rankMatches,
+  resolveSpokenName,
+} from "./telegram-contacts";
+import {
   type PendingSend,
   type TelegramLoginState,
   type TelegramPhase,
@@ -50,6 +56,8 @@ const MAX_MESSAGES_PER_CHAT = 200;
 const MAX_MESSAGE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Pages of `getDifference` to walk before giving up on catching up. */
 const MAX_DIFFERENCE_PAGES = 20;
+/** How many people one `contacts.Search` may offer for a spoken name. */
+const CONTACT_SEARCH_LIMIT = 20;
 /**
  * A socket must never be left open. The client is closed explicitly after every
  * operation; this alarm is the backstop for a path that threw before its
@@ -945,6 +953,92 @@ export class TelegramSession extends DurableObject<Env> {
   /* -------------------------------------------------------------------- send */
 
   /**
+   * The people the caller might mean by a spoken name, best first.
+   *
+   * Three sources, stopping at the first that knows the name. The stored chats
+   * cost nothing and a hit there means the person has actually written to the
+   * caller, so they come first; the account's own address book is next, and
+   * Telegram's own search is the last resort for someone never spoken to. Only
+   * matches for the name asked about are returned — the address book itself is
+   * fetched, used and dropped, never stored.
+   *
+   * Nothing comes back on an unconnected account. An empty list and "not
+   * connected" are different answers, so every caller refuses on the connection
+   * first rather than reading this as "nobody is called that".
+   */
+  async findContacts(spoken: string): Promise<ContactCandidate[]> {
+    const query = spoken.replace(/^@/, "").trim();
+    if (!query) return [];
+    if (this.notConnectedReason()) return [];
+
+    const stored = rankMatches(this.storedPeople(), query, "chat");
+    if (stored.length) return stored;
+
+    return this.withClient(async (client) => {
+      const known = rankMatches(peopleFrom(await client.getContacts()), query, "contacts");
+      if (known.length) return known;
+
+      const found = await client.invoke(
+        new Api.contacts.Search({ q: query, limit: CONTACT_SEARCH_LIMIT }),
+      );
+      return rankMatches(peopleFrom(found.users), query, "search");
+    });
+  }
+
+  /**
+   * The names in the messages table, which is the one source that needs no
+   * socket. `chat_title` is the @username when there is one and the person's
+   * display name when there is not, so a title that is not a handle yields no
+   * handle: the table simply does not know one.
+   */
+  private storedPeople(): NamedPerson[] {
+    return this.ctx.storage.sql
+      .exec<{ chat_title: string }>(
+        `SELECT chat_title, MAX(sent_at) AS last FROM messages
+         WHERE chat_title IS NOT NULL
+         GROUP BY chat
+         ORDER BY last DESC`,
+      )
+      .toArray()
+      .map((row) => ({
+        title: row.chat_title,
+        username: row.chat_title.startsWith("@") ? row.chat_title : null,
+      }));
+  }
+
+  /**
+   * The person a `to` argument names, or what to tell the caller instead.
+   *
+   * A leading @ is taken at its word and resolved as a handle. Anything else is
+   * a spoken name and goes through the lookup, which has to settle on exactly
+   * one person; a name nobody in the account matches may still be a bare handle,
+   * because the @ is optional when the caller says the handle itself.
+   */
+  private async recipientFor(typed: string): Promise<{ recipient: Recipient } | { reason: string }> {
+    if (typed.startsWith("@")) {
+      const recipient = await this.findRecipient(typed);
+      return recipient ? { recipient } : { reason: `I couldn't find anyone with the username ${typed}.` };
+    }
+
+    const people = await this.findContacts(typed);
+    if (!people.length) {
+      const asHandle = await this.findRecipient(typed);
+      if (asHandle) return { recipient: asHandle };
+    }
+
+    const settled = resolveSpokenName(typed, people);
+    if (settled.kind === "refuse") return { reason: settled.reason };
+
+    return {
+      recipient: {
+        username: settled.username,
+        title: settled.title,
+        cold: !this.hasSentTo(settled.username.replace(/^@/, "")),
+      },
+    };
+  }
+
+  /**
    * Looks a person up by handle. Usernames only, which is the whole of this
    * version's addressing: we never build a peer from a stored id, so a stale
    * access hash cannot be sent to by mistake.
@@ -995,16 +1089,11 @@ export class TelegramSession extends DurableObject<Env> {
       return { ok: false, reason: blocked, to: null, title: null, text: null };
     }
 
-    const recipient = await this.findRecipient(to);
-    if (!recipient) {
-      return {
-        ok: false,
-        reason: `I couldn't find anyone with the username @${to.replace(/^@/, "")}.`,
-        to: null,
-        title: null,
-        text: null,
-      };
+    const settled = await this.recipientFor(to);
+    if ("reason" in settled) {
+      return { ok: false, reason: settled.reason, to: null, title: null, text: null };
     }
+    const recipient = settled.recipient;
 
     const verdict = this.capVerdict(recipient.username);
     if (!verdict.allowed) {
@@ -1134,6 +1223,25 @@ export class TelegramSession extends DurableObject<Env> {
 function displayName(user: Api.User): string {
   const parts = [user.firstName, user.lastName].filter(Boolean);
   return parts.join(" ");
+}
+
+/**
+ * The matchable part of a list of Telegram users.
+ *
+ * A deleted account and an empty slot name nobody, so they are dropped rather
+ * than offered as a candidate. A user with no @username is kept: they are a
+ * real answer to the name asked about, and the screen has to be able to say
+ * that they cannot be messaged instead of leaving the caller wondering.
+ */
+function peopleFrom(users: Api.TypeUser[]): NamedPerson[] {
+  return users
+    .filter((user): user is Api.User => user.className === "User")
+    .filter((user) => !user.deleted)
+    .map((user) => ({
+      title: displayName(user) || (user.username ? `@${user.username}` : ""),
+      username: user.username ? `@${user.username}` : null,
+    }))
+    .filter((person) => person.title);
 }
 
 /**

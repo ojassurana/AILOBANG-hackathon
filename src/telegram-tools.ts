@@ -15,20 +15,30 @@
 
 import type { ToolSchema } from "./deepseek";
 import type { ChatSummary, MessageLine, PrepareResult, SendResult, TelegramStatus } from "./telegram";
+import { type ContactCandidate, type ContactSource, describeCandidate } from "./telegram-contacts";
 
 /** The part of `TelegramSession` these tools use. */
 export interface TelegramActions {
   status(): Promise<TelegramStatus>;
   listChats(limit?: number): Promise<ChatSummary[]>;
   readMessages(chat: string, limit?: number): Promise<MessageLine[]>;
+  findContacts(name: string): Promise<ContactCandidate[]>;
   prepareSend(to: string, text: string): Promise<PrepareResult>;
   sendPending(): Promise<SendResult>;
 }
 
 const LIST_CHATS = "telegram_list_chats";
 const READ_MESSAGES = "telegram_read_messages";
+const FIND_CONTACT = "telegram_find_contact";
 const PREPARE_SEND = "telegram_prepare_send";
 const CONFIRM_SEND = "telegram_confirm_send";
+
+/** Where a candidate was found, said the way it would be said out loud. */
+const SOURCE_NOTE: Record<ContactSource, string> = {
+  chat: "has messaged the caller",
+  contacts: "is in the caller's Telegram contacts",
+  search: "came up in Telegram search",
+};
 
 /** Telegram's own cap is far above this; a spoken answer cannot use more. */
 const MAX_LIMIT = 50;
@@ -76,15 +86,39 @@ export const TELEGRAM_TOOLS: ToolSchema[] = [
   {
     type: "function",
     function: {
+      name: FIND_CONTACT,
+      description:
+        "Find who the caller means when they name a person, so a message can be sent without them " +
+        "spelling out an @username. Use this every time the caller names a recipient — a first name, " +
+        "a nickname, a full name — before calling telegram_prepare_send. It matches the chats already " +
+        "read, then the caller's Telegram contacts, then Telegram search, and returns up to five " +
+        "people with their @usernames. One match can be sent to; several mean you must ask which.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "The name the caller said, as they said it. A plain name is expected; an @username also works.",
+          },
+        },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: PREPARE_SEND,
       description:
         "Prepare a Telegram message for the caller to confirm. This does NOT send anything. Give the " +
         "exact text so it can be read back to them; nothing goes out until they say yes and you call " +
-        `telegram_confirm_send. Send to a person by their @username only.`,
+        "telegram_confirm_send. Name the recipient however the caller named them: a spoken name or an " +
+        "@username. A name that more than one person answers to is refused with the candidates, so " +
+        "never guess between them.",
       parameters: {
         type: "object",
         properties: {
-          to: { type: "string", description: "The recipient's @username, e.g. @someone." },
+          to: { type: "string", description: "Who to send to: the name the caller said, or their @username." },
           text: { type: "string", description: "The exact message text, as it will be sent." },
         },
         required: ["to", "text"],
@@ -104,7 +138,7 @@ export const TELEGRAM_TOOLS: ToolSchema[] = [
   },
 ];
 
-const TOOL_NAMES = new Set([LIST_CHATS, READ_MESSAGES, PREPARE_SEND, CONFIRM_SEND]);
+const TOOL_NAMES = new Set([LIST_CHATS, READ_MESSAGES, FIND_CONTACT, PREPARE_SEND, CONFIRM_SEND]);
 
 export function isTelegramTool(name: string): boolean {
   return TOOL_NAMES.has(name);
@@ -130,6 +164,8 @@ export class TelegramToolbox {
         return this.listChats(rawArguments);
       case READ_MESSAGES:
         return this.readMessages(rawArguments);
+      case FIND_CONTACT:
+        return this.findContact(rawArguments);
       case PREPARE_SEND:
         return this.prepareSend(rawArguments);
       case CONFIRM_SEND:
@@ -203,11 +239,44 @@ export class TelegramToolbox {
     ].join("\n");
   }
 
+  private async findContact(rawArguments: string): Promise<string> {
+    const args = parseArguments(rawArguments);
+    const name = text(args.name);
+    if (!name) return `Give ${FIND_CONTACT} the name the caller said, as they said it.`;
+
+    const people = await this.telegram.findContacts(name);
+    if (!people.length) {
+      return (
+        `Nobody in the caller's Telegram matches "${name}". Say that plainly, and ask them to spell ` +
+        `the @username if they know it.`
+      );
+    }
+
+    const described = (person: ContactCandidate) =>
+      `${describeCandidate(person)} — ${SOURCE_NOTE[person.source]}`;
+
+    if (people.length === 1) {
+      const [only] = people;
+      return only.username
+        ? `One person matches "${name}": ${described(only)}.\n` +
+            `Send to ${only.username}. Read the name back as you confirm, so the caller hears who it is going to.`
+        : `One person matches "${name}": ${described(only)}.\n` +
+            `Tell the caller plainly that this person has no @username and cannot be messaged: ` +
+            `Telegram needs a handle to send to.`;
+    }
+
+    return [
+      `Several people match "${name}":`,
+      ...people.map((person, index) => `${index + 1}. ${described(person)}`),
+      `Ask the caller which one they mean, and do not pick one yourself.`,
+    ].join("\n");
+  }
+
   private async prepareSend(rawArguments: string): Promise<string> {
     const args = parseArguments(rawArguments);
     const to = text(args.to);
     const body = text(args.text);
-    if (!to) return `Give ${PREPARE_SEND} who to send to: the person's @username.`;
+    if (!to) return `Give ${PREPARE_SEND} who to send to: the name the caller said, or their @username.`;
     if (!body) return `Give ${PREPARE_SEND} the exact message text.`;
 
     const prepared = await this.telegram.prepareSend(to, body);
