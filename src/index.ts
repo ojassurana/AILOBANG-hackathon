@@ -35,7 +35,7 @@ import {
   type ConnectedAccount,
 } from "./composio";
 import { renderCallPage } from "./call-page";
-import { renderCodingPage, codingChatEmbed } from "./coding-page";
+import { renderCodingPage } from "./coding-page";
 import { renderTelegramPage } from "./telegram-page";
 import type { TelegramStatus } from "./telegram";
 import type { Env } from "./env";
@@ -864,33 +864,6 @@ function renderConnectionsPage(
         text-decoration: none;
         box-shadow: var(--shadow);
       }
-      .modes { display: grid; gap: 12px; }
-      .cc-box {
-        margin-top: 16px;
-        padding: 16px 18px 14px;
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        box-shadow: var(--shadow);
-      }
-      .cc-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
-      .cc-box .log { min-height: 180px; max-height: 360px; overflow: auto; white-space: pre-wrap; }
-      .cc-box .log .empty { color: var(--muted); margin: 0; }
-      .cc-box .line { margin: 0 0 12px; }
-      .cc-box .role { display: block; font-size: 12px; font-weight: 600; color: var(--muted); }
-      .cc-box form { display: flex; gap: 8px; margin-top: 10px; }
-      .cc-box textarea {
-        flex: 1 1 auto; min-height: 64px; resize: vertical; padding: 10px 12px;
-        border-radius: 12px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font: inherit;
-      }
-      .cc-box button {
-        flex: none; align-self: flex-end; padding: 10px 16px; border: 0; border-radius: 10px;
-        background: var(--accent); color: var(--accent-fg); font: inherit; font-weight: 600; cursor: pointer;
-      }
-      .cc-box .ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); padding: 6px 10px; font-size: 13px; }
-      .cc-box .row { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
-      .cc-box .err { color: #c0392b; font-size: 13px; margin: 0; }
-      .cc-box .status { color: var(--muted); font-size: 13px; }
       .call:hover { opacity: 0.92; }
       .callicon {
         flex: none;
@@ -1029,8 +1002,6 @@ ${rows}
         </table>
       </div>
       <p class="soon">More connectors coming soon</p>
-      ${codingChatEmbed(session.sub)}
-      <div class="modes">
       <a class="call" href="/call">
         <span class="callicon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -1046,23 +1017,6 @@ ${rows}
         </span>
         <span class="callgo">Start call</span>
       </a>
-      <a class="call" href="/code">
-        <span class="callicon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M8 6h8" />
-            <path d="M8 12h8" />
-            <path d="M8 18h5" />
-            <path d="M5 4h14v16H5z" />
-          </svg>
-        </span>
-        <span class="calltext">
-          <span class="calltitle">Coding chat</span>
-          <span class="callsub">Text chat for writing and debugging code. Separate from voice.</span>
-        </span>
-        <span class="callgo">Open chat</span>
-      </a>
-      </div>
     </div>
   </body>
 </html>`;
