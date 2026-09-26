@@ -157,6 +157,17 @@ export class TelegramSession extends DurableObject<Env> {
   private client: TelegramClient | null = null;
 
   /**
+   * The session string as it stood when the socket last closed.
+   *
+   * The auth key only lives in the session object between `connect()` and
+   * `disconnect()`, and Telegram ties a login's phone code hash to the key that
+   * asked for it. Callers persist the session after the exchange has finished,
+   * by which point the client is gone, so the value has to be kept as the client
+   * goes away rather than read back out of it later.
+   */
+  private sessionAtClose: string | null = null;
+
+  /**
    * There is no HTTP surface. The binding is reachable at
    * `/agents/telegram-session/<name>` because the agents router exposes every
    * Durable Object binding, so this closes that route instead of leaving it to
@@ -300,6 +311,7 @@ export class TelegramSession extends DurableObject<Env> {
    * disconnecting really does erase what we saw rather than just hiding it.
    */
   private wipe(): void {
+    this.sessionAtClose = null;
     const sql = this.ctx.storage.sql;
     sql.exec(`DELETE FROM login`);
     sql.exec(`DELETE FROM updates_state`);
@@ -361,6 +373,8 @@ export class TelegramSession extends DurableObject<Env> {
 
   private async closeClient(): Promise<void> {
     const client = this.client;
+    // Before the reference goes: this is the last moment the auth key exists.
+    if (client) this.sessionAtClose = this.liveSessionString();
     this.client = null;
     await this.ctx.storage.deleteAlarm();
     if (!client) return;
@@ -435,10 +449,19 @@ export class TelegramSession extends DurableObject<Env> {
       const sent = result as Api.auth.SentCode;
       const viaApp = sent.type?.className === "auth.SentCodeTypeApp";
       // The auth key created by this call is what the code will be checked
-      // against, so it has to survive the disconnect that follows.
-      this.writeLogin(codeSent(normalized, sent.phoneCodeHash, viaApp, Date.now()), {
-        session: this.liveSessionString(),
-      });
+      // against, so it has to survive the disconnect that follows. Without it
+      // the next step opens a different key, and Telegram then rejects even a
+      // correct code as expired — which reads to the user as a wrong code.
+      const next = codeSent(normalized, sent.phoneCodeHash, viaApp, Date.now());
+      const session = this.liveSessionString();
+      if (!session) {
+        this.writeLogin(
+          { ...restartLogin(next), error: "That sign-in didn't stick. Try again." },
+          { session: null },
+        );
+        return this.status();
+      }
+      this.writeLogin(next, { session });
     } catch (error) {
       this.recordLoginError(error, normalized);
     }
@@ -518,8 +541,10 @@ export class TelegramSession extends DurableObject<Env> {
   }
 
   async restartLogin(): Promise<TelegramStatus> {
-    this.writeLogin(restartLogin(this.loginState()), { session: null });
+    const state = restartLogin(this.loginState());
     await this.closeClient();
+    this.sessionAtClose = null;
+    this.writeLogin(state, { session: null });
     return this.status();
   }
 
@@ -537,13 +562,17 @@ export class TelegramSession extends DurableObject<Env> {
   }
 
   /**
-   * The session string as the live client holds it. Called while the client is
-   * open, because that is the only moment it includes the auth key the last
-   * exchange actually used.
+   * The session string the last exchange used.
+   *
+   * While a client is open this reads it directly, because that is the only
+   * moment it includes the auth key the exchange just used. Between exchanges it
+   * falls back to what `closeClient` kept, so a caller persisting the session
+   * after the fact still gets that key rather than nothing.
    */
   private liveSessionString(): string | null {
+    if (!this.client) return this.sessionAtClose;
     try {
-      return this.client ? String(this.client.session.save()) : null;
+      return String(this.client.session.save()) || null;
     } catch (error) {
       console.error("telegram: could not save session", error);
       return null;
