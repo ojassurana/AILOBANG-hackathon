@@ -160,7 +160,12 @@ export class ConnectorHarness {
     this.mcpSchemas = toSchemas(await this.mcp.listTools());
   }
 
-  async run(transcript: string, onProgress: (note: string) => void): Promise<HarnessResult> {
+  async run(
+    transcript: string,
+    onProgress: (note: string) => void,
+    _signal?: AbortSignal,
+    options?: { system?: string; maxAnswerChars?: number },
+  ): Promise<HarnessResult> {
     await this.warmUp();
     const schemas = [
       ...(this.mcpSchemas ?? []),
@@ -169,9 +174,10 @@ export class ConnectorHarness {
     ];
 
     const messages: ChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: options?.system ?? SYSTEM_PROMPT },
       { role: "user", content: `Conversation so far:\n${transcript}` },
     ];
+    const maxAnswer = options?.maxAnswerChars ?? MAX_ANSWER_CHARS;
 
     const steps: string[] = [];
     let answer: string | null = null;
@@ -217,7 +223,7 @@ export class ConnectorHarness {
     }
 
     return {
-      text: truncate(answer ?? "I could not find that. Please try asking again.", MAX_ANSWER_CHARS),
+      text: truncate(answer ?? "I could not find that. Please try asking again.", maxAnswer),
       steps,
     };
   }

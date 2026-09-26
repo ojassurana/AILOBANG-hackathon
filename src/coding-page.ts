@@ -97,7 +97,7 @@ export function renderCodingPage({ email, userId }: CodingPageOptions): string {
       <div class="top">
         <div>
           <h1>Coding chat</h1>
-          <p class="sub">Text chat for code. Separate from the voice call.</p>
+          <p class="sub">Text chat for code, on the same connected accounts as the call.</p>
         </div>
         <div class="who">${escapeHtml(email)}<br />
           <a href="/call">Voice call</a> · <a href="/app">Accounts</a>
@@ -273,6 +273,150 @@ export function renderCodingPage({ email, userId }: CodingPageOptions): string {
     </script>
   </body>
 </html>`;
+}
+
+/** Chat box for the connectors page — same CodingAgent socket as /code. */
+export function codingChatEmbed(userId: string): string {
+  return `
+      <div class="cc-box">
+        <div class="cc-head">
+          <strong>Chat with your accounts</strong>
+          <span class="status" id="status">Connecting…</span>
+        </div>
+        <div class="log" id="log"><p class="empty">Ask anything — mail, docs, code, Telegram. Same connectors as the call.</p></div>
+        <form id="form">
+          <textarea id="input" rows="3" placeholder="Ask or paste code…" required></textarea>
+          <button type="submit" id="send">Send</button>
+        </form>
+        <div class="row">
+          <p class="err" id="error"></p>
+          <button class="ghost" type="button" id="clear">Clear</button>
+        </div>
+      </div>
+      <script>
+      (function () {
+        var USER_ID = ${JSON.stringify(userId)};
+        var logEl = document.getElementById("log");
+        var form = document.getElementById("form");
+        var input = document.getElementById("input");
+        var sendBtn = document.getElementById("send");
+        var statusEl = document.getElementById("status");
+        var errorEl = document.getElementById("error");
+        var messages = [];
+        var socket = null;
+        var busy = false;
+        var draft = "";
+        function setStatus(text) { statusEl.textContent = text; }
+        function setError(text) { errorEl.textContent = text || ""; }
+        function setBusy(value) {
+          busy = value;
+          sendBtn.disabled = value || !socket || socket.readyState !== 1;
+        }
+        function textOf(msg) {
+          var parts = msg.parts || [];
+          var out = [];
+          for (var i = 0; i < parts.length; i++) {
+            if (parts[i].type === "text" && parts[i].text) out.push(parts[i].text);
+          }
+          return out.join("");
+        }
+        function render() {
+          if (!messages.length && !draft) {
+            logEl.innerHTML = '<p class="empty">Ask anything — mail, docs, code, Telegram. Same connectors as the call.</p>';
+            return;
+          }
+          var html = "";
+          for (var i = 0; i < messages.length; i++) {
+            var body = textOf(messages[i]);
+            if (!body) continue;
+            html += '<div class="line ' + messages[i].role + '"><span class="role">' +
+              (messages[i].role === "user" ? "You" : "Ailobang") +
+              '</span><div class="body"></div></div>';
+          }
+          logEl.innerHTML = html;
+          var bodies = logEl.querySelectorAll(".line .body");
+          var n = 0;
+          for (var j = 0; j < messages.length; j++) {
+            var t = textOf(messages[j]);
+            if (!t) continue;
+            bodies[n].textContent = t;
+            n++;
+          }
+          if (draft) {
+            var extra = document.createElement("div");
+            extra.className = "line assistant";
+            extra.innerHTML = '<span class="role">Ailobang</span><div class="body"></div>';
+            extra.querySelector(".body").textContent = draft;
+            logEl.appendChild(extra);
+          }
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+        function applyChunk(chunk) {
+          if (!chunk || typeof chunk !== "object") return;
+          var t = chunk.type;
+          if (t === "text-delta" || t === "text") {
+            draft += chunk.delta || chunk.text || "";
+            render();
+          } else if (t === "error") {
+            setError(chunk.errorText || chunk.error || "The model failed.");
+          }
+        }
+        function connect() {
+          var protocol = location.protocol === "https:" ? "wss:" : "ws:";
+          socket = new WebSocket(protocol + "//" + location.host + "/agents/coding-agent/" + encodeURIComponent(USER_ID));
+          socket.onopen = function () {
+            setStatus("Connected");
+            setError("");
+            setBusy(false);
+            fetch("/agents/coding-agent/" + encodeURIComponent(USER_ID) + "/get-messages", { credentials: "same-origin" })
+              .then(function (res) { return res.ok ? res.json() : []; })
+              .then(function (list) { if (Array.isArray(list)) { messages = list; render(); } })
+              .catch(function () {});
+          };
+          socket.onclose = function () {
+            setStatus("Disconnected — retrying");
+            setBusy(true);
+            setTimeout(connect, 1200);
+          };
+          socket.onerror = function () { setError("Socket error"); };
+          socket.onmessage = function (event) {
+            var msg;
+            try { msg = JSON.parse(event.data); } catch (e) { return; }
+            if (msg.type === "cf_agent_chat_messages" && Array.isArray(msg.messages)) {
+              messages = msg.messages; draft = ""; setBusy(false); render();
+            } else if (msg.type === "cf_agent_use_chat_response") {
+              if (msg.error) setError(msg.body || "Request failed");
+              if (msg.body) {
+                try { applyChunk(JSON.parse(msg.body)); } catch (e) {
+                  draft += String(msg.body); render();
+                }
+              }
+              if (msg.done) { draft = ""; setBusy(false); }
+            } else if (msg.type === "cf_agent_chat_clear") {
+              messages = []; draft = ""; render();
+            }
+          };
+        }
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          var text = input.value.trim();
+          if (!text || !socket || socket.readyState !== 1 || busy) return;
+          messages = messages.concat([{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: text }] }]);
+          input.value = ""; draft = ""; setBusy(true); setError(""); render();
+          socket.send(JSON.stringify({
+            type: "cf_agent_use_chat_request",
+            id: crypto.randomUUID().slice(0, 8),
+            init: { method: "POST", body: JSON.stringify({ messages: messages }) }
+          }));
+        });
+        document.getElementById("clear").addEventListener("click", function () {
+          if (!socket || socket.readyState !== 1) return;
+          socket.send(JSON.stringify({ type: "cf_agent_chat_clear" }));
+          messages = []; draft = ""; render();
+        });
+        connect();
+      })();
+      </script>`;
 }
 
 function escapeHtml(value: string): string {
