@@ -83,7 +83,7 @@ export const CONNECTORS: Connector[] = [
     blurb: "Send and read your messages",
     capabilities: [
       "Read messages as they arrive, from the moment you connect",
-      "Send a message to someone by their @username",
+      "Send a message to someone in your contacts or chats, no @username needed",
       "See which chats have something new",
     ],
     kind: "telegram",

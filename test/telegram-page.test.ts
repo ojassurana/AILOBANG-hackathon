@@ -99,6 +99,15 @@ check("a connected account with no @handle is named by its number", () => {
   assert.match(html, /<strong>\+15555550123<\/strong>/);
 });
 
+check("a connected account invites a name, not a handle", () => {
+  // Sending no longer needs a public @username — a username-less contact is
+  // reached by their account — so the screen must not ask for one.
+  const html = screen({ phase: "connected", phone: "+15555550123", username: "someone" });
+  assert.match(html, /send a message to someone by name/);
+  assert.match(html, /does not need a public @username/);
+  assert.doesNotMatch(html, /by their @username/);
+});
+
 check("a connected account never leaves the identity sentence hanging", () => {
   // This is the bug that was reported: with no username and no kept number the
   // screen read "Signed in as ." — the sentence has to stand on its own.
