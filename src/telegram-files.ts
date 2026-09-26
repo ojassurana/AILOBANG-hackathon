@@ -104,10 +104,13 @@ export function settleFile(file: OutgoingFile): SettledFile | { reason: string }
   }
 
   if (content) {
-    const bytes = new TextEncoder().encode(content);
+    // Text asked for as a PDF has to become one: text bytes under a .pdf name
+    // arrive as a file no reader will open.
+    const asPdf = /\.pdf$/i.test(filename ?? "");
+    const bytes = asPdf ? textToPdf(content) : new TextEncoder().encode(content);
     if (bytes.byteLength > MAX_FILE_BYTES) return { reason: tooBig(bytes.byteLength) };
     return {
-      source: { kind: "bytes", bytes, mimeType: "text/plain" },
+      source: { kind: "bytes", bytes, mimeType: asPdf ? "application/pdf" : "text/plain" },
       filename: filename ?? "message.txt",
       caption,
       mode,
@@ -152,6 +155,99 @@ export function fileFingerprint(file: SettledFile, filename: string): string {
 export function tooBig(bytes: number): string {
   const mb = (bytes / (1024 * 1024)).toFixed(1);
   return `That file is ${mb} MB; at most 20 MB can be sent from here.`;
+}
+
+const PDF_PAGE = { width: 612, height: 792, margin: 54, fontSize: 11, lineHeight: 14 };
+/** Helvetica averages about half an em a character, which is what this wraps by. */
+const PDF_LINE_CHARS = Math.floor((PDF_PAGE.width - 2 * PDF_PAGE.margin) / (PDF_PAGE.fontSize * 0.5));
+const PDF_PAGE_LINES = Math.floor((PDF_PAGE.height - 2 * PDF_PAGE.margin) / PDF_PAGE.lineHeight);
+
+/**
+ * Plain text as a letter-size PDF in Helvetica, wrapped and paginated.
+ *
+ * The standard fonts only carry Latin-1, so anything outside it is shown as
+ * "?" rather than breaking the file. Blank lines are kept, so paragraphs stay.
+ */
+export function textToPdf(text: string): Uint8Array {
+  const lines = wrapLines(text.replace(/\r\n?/g, "\n").replace(/\t/g, "    "), PDF_LINE_CHARS);
+  const pages: string[][] = [];
+  for (let start = 0; start < Math.max(lines.length, 1); start += PDF_PAGE_LINES) {
+    pages.push(lines.slice(start, start + PDF_PAGE_LINES));
+  }
+
+  // Objects: 1 catalog, 2 page tree, 3 font, then a page and its content per page.
+  const objects: string[] = [];
+  const pageIds = pages.map((_, index) => 4 + index * 2);
+  objects[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+  objects[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`;
+  objects[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
+  pages.forEach((pageLines, index) => {
+    const pageId = pageIds[index];
+    const top = PDF_PAGE.height - PDF_PAGE.margin - PDF_PAGE.fontSize;
+    const body = pageLines.map((line) => `(${pdfString(line)}) Tj T*`).join("\n");
+    const stream =
+      `BT /F1 ${PDF_PAGE.fontSize} Tf ${PDF_PAGE.lineHeight} TL ${PDF_PAGE.margin} ${top} Td\n${body}\nET`;
+    objects[pageId] =
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PDF_PAGE.width} ${PDF_PAGE.height}] ` +
+      `/Resources << /Font << /F1 3 0 R >> >> /Contents ${pageId + 1} 0 R >>`;
+    objects[pageId + 1] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+  });
+
+  // Every character is Latin-1 by now, so string offsets are byte offsets.
+  let pdf = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (let id = 1; id < objects.length; id++) {
+    offsets[id] = pdf.length;
+    pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+  }
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+  for (let id = 1; id < objects.length; id++) pdf += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+  pdf += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+
+  const bytes = new Uint8Array(pdf.length);
+  for (let i = 0; i < pdf.length; i++) bytes[i] = pdf.charCodeAt(i);
+  return bytes;
+}
+
+function wrapLines(text: string, width: number): string[] {
+  const out: string[] = [];
+  for (const paragraph of text.split("\n")) {
+    if (!paragraph.trim()) {
+      out.push("");
+      continue;
+    }
+    let line = "";
+    for (const word of paragraph.split(/ +/)) {
+      for (let piece = word; piece; piece = piece.slice(width)) {
+        const chunk = piece.slice(0, width);
+        if (!line) line = chunk;
+        else if (line.length + 1 + chunk.length <= width) line += ` ${chunk}`;
+        else {
+          out.push(line);
+          line = chunk;
+        }
+      }
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/** Punctuation outside Latin-1 that WinAnsi still carries, at its WinAnsi byte. */
+const WIN_ANSI_EXTRAS: Record<string, number> = {
+  "€": 0x80, "…": 0x85, "‘": 0x91, "’": 0x92, "“": 0x93, "”": 0x94, "•": 0x95, "–": 0x96, "—": 0x97, "™": 0x99,
+};
+
+/** A line as a PDF literal string in WinAnsi, with its delimiters escaped. */
+function pdfString(line: string): string {
+  return Array.from(line, (char) => {
+    const extra = WIN_ANSI_EXTRAS[char];
+    if (extra !== undefined) return String.fromCharCode(extra);
+    const code = char.codePointAt(0) ?? 63;
+    const latin = (code >= 0x20 && code < 0x7f) || (code >= 0xa0 && code <= 0xff) ? char : "?";
+    return latin === "\\" || latin === "(" || latin === ")" ? `\\${latin}` : latin;
+  }).join("");
 }
 
 function cleanFilename(value: unknown): string | null {

@@ -87,7 +87,9 @@ link, say), make that first and put the real result in the text.
 
 Files go with telegram_send_file, under the same rules: photos, videos, voice
 notes, PDFs, spreadsheets, anything up to 20 MB. Pass a download link another
-tool returned as url, or text you wrote as content with a filename, and never
+tool returned as url, or text you wrote as content with a filename — a .pdf
+filename turns that text into a real PDF, so write the document yourself when
+the caller asks for one — and never
 paste a link into telegram_send when the caller asked for the file itself.
 
 The caller never has to spell out a handle. Pass the name as they said it — a

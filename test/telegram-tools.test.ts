@@ -402,6 +402,32 @@ check("text content becomes a named text file, and bytes decode from base64 or a
   assert.equal(png.source.kind === "bytes" && png.source.bytes[1], 0x50);
 });
 
+check("text asked for as a .pdf becomes a well-formed, paginated PDF", () => {
+  const long = Array.from({ length: 120 }, (_, i) => `Line ${i} (with parens) and a back\\slash — “quoted”`).join("\n");
+  const settled = settleFile({ content: long, filename: "report.pdf" });
+  assert.ok(!("reason" in settled) && settled.source.kind === "bytes");
+  assert.equal(settled.source.mimeType, "application/pdf");
+
+  const pdf = Array.from(settled.source.bytes, (b) => String.fromCharCode(b)).join("");
+  assert.ok(pdf.startsWith("%PDF-1.4\n"));
+  assert.ok(pdf.endsWith("%%EOF\n"));
+  assert.match(pdf, /\/Count 3 /);
+  assert.match(pdf, /\\\(with parens\\\)/);
+  assert.match(pdf, /back\\\\slash/);
+  assert.ok(pdf.includes("\x93quoted\x94"));
+
+  // Every xref entry points at the object it names, and startxref at the table.
+  const xrefAt = Number(pdf.match(/startxref\n(\d+)/)![1]);
+  assert.ok(pdf.startsWith("xref\n", xrefAt));
+  const entries = pdf.slice(xrefAt).match(/(\d{10}) 00000 n /g)!;
+  entries.forEach((entry, index) => {
+    assert.ok(pdf.startsWith(`${index + 1} 0 obj`, Number(entry.slice(0, 10))), `object ${index + 1} offset`);
+  });
+
+  const text = settleFile({ content: "a,b", filename: "sheet.csv" });
+  assert.ok(!("reason" in text) && text.source.kind === "bytes" && text.source.mimeType === "text/plain");
+});
+
 check("text past the size limit is refused before anything is sent", () => {
   const huge = settleFile({ content: "x".repeat(MAX_FILE_BYTES + 1) });
   assert.match((huge as { reason: string }).reason, /at most 20 MB/);

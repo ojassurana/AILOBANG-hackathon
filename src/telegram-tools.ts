@@ -154,7 +154,12 @@ export const TELEGRAM_TOOLS: ToolSchema[] = [
               "Who to send to: the name the caller said, or their @username. A name alone is enough.",
           },
           url: { type: "string", description: "An http(s) link to download the file from." },
-          content: { type: "string", description: "Text to send as the file's contents." },
+          content: {
+            type: "string",
+            description:
+              "Text to send as the file's contents. With a filename ending in .pdf it is rendered " +
+              "into a real PDF document; otherwise it goes as that file (.txt, .csv, .md, ...).",
+          },
           base64: { type: "string", description: "The file's bytes, base64-encoded." },
           filename: {
             type: "string",
