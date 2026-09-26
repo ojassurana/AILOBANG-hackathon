@@ -140,6 +140,8 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
       }
       .action:hover { color: var(--fg); border-color: var(--fg); }
       .action[data-done="1"] { color: var(--ok); border-color: var(--ok); }
+      .mute { margin-top: 16px; font-size: 13px; padding: 6px 16px; }
+      .mute[aria-pressed="true"] { color: var(--bad); border-color: var(--bad); }
       .log { padding: 14px 18px 18px; max-height: 320px; overflow-y: auto; }
       .log p { margin: 0 0 10px; font-size: 14.5px; }
       .log p:last-child { margin-bottom: 0; }
@@ -168,6 +170,7 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
             <path d="M12 18v3" />
           </svg>
         </button>
+        <div><button class="action mute" id="mute" type="button" aria-pressed="false" hidden>Mute</button></div>
         <p class="status"><span class="dot" id="dot"></span><span id="status">Ready when you are</span></p>
         <p class="hint" id="hint">Press the microphone to start the call.</p>
         <p class="timer" id="timer" hidden>0:00</p>
@@ -205,8 +208,10 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
         var logEl = document.getElementById("log");
         var copyBtn = document.getElementById("copy");
         var downloadBtn = document.getElementById("download");
+        var muteBtn = document.getElementById("mute");
 
         var socket = null;
+        var muted = false;
         var context = null;
         var stream = null;
         var source = null;
@@ -386,8 +391,10 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
           var buffer = new ArrayBuffer(samples.length * 2);
           var view = new DataView(buffer);
           var sum = 0;
+          // Muted frames still go out as silence so the line stays open and the
+          // assistant keeps talking instead of waiting on a gap.
           for (var i = 0; i < samples.length; i++) {
-            var sample = Math.max(-1, Math.min(1, samples[i]));
+            var sample = muted ? 0 : Math.max(-1, Math.min(1, samples[i]));
             view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
             sum += sample * sample;
           }
@@ -455,8 +462,9 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
               mic.disabled = false;
               mic.dataset.state = "live";
               mic.setAttribute("aria-label", "End the call");
-              setStatus("Live", "ok");
+              setStatus(muted ? "Live · muted" : "Live", "ok");
               hint.textContent = "Just talk. Press the microphone again to end the call.";
+              muteBtn.hidden = false;
               if (!timerId) startTimer();
             } else if (message.state === "ended") {
               // The agent says why it ended, which is worth showing rather than
@@ -490,6 +498,16 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
           setStatus(label, seconds ? "ok" : undefined);
           hint.textContent = "Press the microphone to start another call.";
           setNote(null);
+          setMuted(false);
+          muteBtn.hidden = true;
+        }
+
+        function setMuted(value) {
+          muted = value;
+          speechFrames = 0;
+          muteBtn.textContent = muted ? "Unmute" : "Mute";
+          muteBtn.setAttribute("aria-pressed", muted ? "true" : "false");
+          if (state === "live") setStatus(muted ? "Live · muted" : "Live", "ok");
         }
 
         function teardown() {
@@ -564,6 +582,7 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
           else if (state === "idle" || state === "ended") start();
         });
 
+        muteBtn.addEventListener("click", function () { setMuted(!muted); });
         copyBtn.addEventListener("click", copyTranscript);
         downloadBtn.addEventListener("click", downloadTranscript);
 
