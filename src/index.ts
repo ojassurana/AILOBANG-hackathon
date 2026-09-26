@@ -432,7 +432,9 @@ function renderConnectionsPage(
       @media (max-width: 560px) {
         .bl, .who { display: none; }
         .shell { padding: 32px 14px 56px; }
-        td { padding: 12px 14px; }
+        td { padding: 12px 12px; }
+        .btn { padding: 8px 11px; font-size: 13px; }
+        .acct { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
       }
     </style>
   </head>
