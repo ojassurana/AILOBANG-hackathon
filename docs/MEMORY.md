@@ -87,8 +87,8 @@ ends, and after each coding-chat turn. Never on the call's path.
 - `VoiceAgent` — `brief()` into the session instructions; `keepMemory()` after
   delegations and at call end; a `memory` page event to the call page.
 - `CodingAgent` — same harness, same pass after each turn.
-- `/memory` — the tree and the decision log for the signed-in user, polling
-  `/memory.json`.
+- `/memory` — two lists for the signed-in user, Personal memory and Personal
+  workflows, polling `/memory.json`.
 
 ## Secrets
 

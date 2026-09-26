@@ -427,7 +427,7 @@ async function callPage(request: Request, env: Env): Promise<Response> {
 
 /* ----------------------------------------------------------------- memory */
 
-/** The memory page: the tree the agent built for this user, and the decisions behind it. */
+/** The memory page: personal memory and personal workflows for this user. */
 async function memoryPage(request: Request, env: Env): Promise<Response> {
   const session = await currentSession(request, env);
   if (!session) return redirect("/signin", request);
@@ -447,7 +447,7 @@ async function memoryPage(request: Request, env: Env): Promise<Response> {
   });
 }
 
-/** The tree and recent events as JSON, for the memory page's polling. */
+/** Personal memory and workflows as JSON, for the memory page's polling. */
 async function memoryData(request: Request, env: Env): Promise<Response> {
   const session = await currentSession(request, env);
   if (!session) return new Response("Unauthorized", { status: 401 });
