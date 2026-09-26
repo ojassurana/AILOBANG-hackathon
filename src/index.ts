@@ -1459,15 +1459,15 @@ function renderConnectionsPage(
       .hints { padding: 18px 20px; border-style: dashed; background: transparent; box-shadow: none; }
       .hints ul { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
       .hints li + li { margin-top: 4px; }
-      .calls { padding: 16px 18px 14px; }
+      .calls { padding: 16px 18px 14px; overflow: hidden; }
       .rowhead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
       .calls .more { color: var(--muted); font-size: 12.5px; text-decoration: none; }
       .calls .more:hover { color: var(--fg); text-decoration: underline; }
-      .calls ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 2px; }
-      .calls a { display: block; padding: 8px 10px; margin: 0 -10px; border-radius: 10px;
+      .calls ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 2px; min-width: 0; }
+      .calls a { display: block; min-width: 0; overflow: hidden; padding: 8px 10px; margin: 0 -10px; border-radius: 10px;
         color: inherit; text-decoration: none; }
       .calls a:hover { background: rgba(127, 127, 127, 0.12); }
-      .calls .ct { display: block; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .calls .ct { display: block; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .calls .cm { display: block; margin-top: 1px; color: var(--muted); font-size: 12.5px; }
       .calls .none { margin: 10px 0 2px; color: var(--muted); font-size: 13px; }
       /* On phones the rail moves above the shelf, and the call action follows
