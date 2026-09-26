@@ -75,12 +75,7 @@
     // overrides it to sandbox, with the sandbox secret, for `wrangler dev`.
     "PLAID_ENV": "production"
   },
-  "routes": [
-    {
-      "pattern": "ailobang.com",
-      "custom_domain": true
-    }
-  ],
+  "workers_dev": true,
   "observability": {
     "enabled": true
   }
