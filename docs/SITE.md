@@ -89,7 +89,7 @@ typechecking and editor support.
 
 ## Connectors (Composio)
 
-`/app` is the **Connect your accounts** page: a table of the 11 connectors in
+`/app` is the **Connect your accounts** page: a table of the connectors in
 `src/connectors.ts`, each row showing its connection state and a **Connect now** button.
 
 Connections are scoped by Composio `user_id`, which is set to the **WorkOS user id**
@@ -106,20 +106,22 @@ The flow:
    redirects to `/app?connected=<toolkit>` and shows a confirmation.
 4. `/app` reads state from `GET /api/v3.1/connected_accounts?user_ids=<user id>`.
 
-**Auth configs.** Composio requires an `auth_config_id` per toolkit. All 11 are
+**Auth configs.** Composio requires an `auth_config_id` per toolkit. All of them are
 Composio-managed OAuth2 configs (`is_composio_managed: true`), so the project needs no OAuth
-apps of its own. They were created with the Composio CLI, one per toolkit:
+apps of its own. They live in the **`AiLobang`** project — the project the `COMPOSIO_API_KEY`
+belongs to — and were created by POSTing to `/api/v3.1/auth_configs`:
 
-```bash
-composio dev auth-configs create --toolkit gmail
+```json
+{ "toolkit": { "slug": "gmail" }, "auth_config": { "type": "use_composio_managed_auth" } }
 ```
 
-The ids live in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
+The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
 `googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
 
 **Constraints worth knowing**
 
-- Instagram's toolkit supports **Business or Creator** accounts only, not personal accounts.
+- Instagram was in the original list and was removed on 2026-09-19 at Ojas's request; its auth
+  config was deleted too. Instagram's toolkit also only supports Business or Creator accounts.
 - The account label shown in the table is derived from the connected account's own fields, since
   OAuth2 token responses carry no profile data. Composio's `whoami` identity resolution is
   CLI-only today.
