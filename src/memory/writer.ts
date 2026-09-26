@@ -140,7 +140,7 @@ Rules:
 - Reuse the folders and skills in the outline whenever they fit. Create a folder only when nothing in the outline fits, and never a near-duplicate of one that exists (no "family" next to "relatives").
 - A skill is the leaf that holds the memory. Update an existing skill by returning the merged content in full: what was known before, corrected by what is new. Never drop a fact just because it was not mentioned this time.
 - When the new information contradicts the old, the new wins and the content says the current state, not the history.
-- Return an empty operations list when nothing durable was learned. Small talk, one-off requests and things already in the outline unchanged are not memories.
+- Return an empty operations list when nothing durable was learned. Small talk, greetings, and things already in the outline unchanged are not memories. A successful job with their apps is a workflow, even one step.
 - Never store secrets, passwords, one-time codes, card numbers, or the text of the assistant's own replies.`;
 
 const PERSONAL_PROMPT = `You keep the long-term personal memory of a voice assistant's user, as a folder tree under "personal/".
@@ -149,22 +149,25 @@ What counts as personal memory: who the people in their life are and how to reac
 
 Contact details matter most. Whenever the caller names someone and an email address, phone number or handle for them comes up — even only so a task could be done, like sharing a document or sending a message — keep that person with that detail, so next time the name alone is enough. Take the exact spelling from the work record when it has one (a spoken "four nine two X at gmail dot com" is the address the tool call used).
 
+Do not write a diary. What was sent, posted, shared or created this call is a workflow, not a personal fact. A contact is who they are and how to reach them. Never append "the caller sent them …" or the text of a message.
+
 ${SHARED_RULES}
-- Content is a few plain sentences in the third person ("The caller's sister Priya lives in Boston."). For a contact: who they are if known, and every way to reach them ("Himanshu Sharma. Email: himanshusharma492x@gmail.com. The caller shared a Google Doc with him.").
+- Content is a few plain sentences in the third person ("The caller's sister Priya lives in Boston."). For a contact: who they are if known, and every way to reach them ("Himanshu Sharma. Email: himanshusharma492x@gmail.com.").
 - When only a name and a contact detail are known, the person still gets a skill; file them under relationships (in a contacts folder unless the relationship is clear).
-- One skill per person, place or topic. Put people under a relationships folder (family, friends, work), places under travel or home, habits under routines, taste under preferences, unless the outline already organises them another way.`;
+- One skill per person, place or topic. Put people under a relationships folder (family, friends, work), places under travel or home, habits under routines, taste under preferences, unless the outline already organises them another way.
+- When updating an existing skill that lists past jobs or messages, drop that play-by-play and keep only the durable facts.`;
 
-const WORKFLOW_PROMPT = `You keep the workflow memory of a voice assistant's backend, as a folder tree under "workflow/": reusable procedures for multi-step jobs it did with its tools, so the next time takes one step.
+const WORKFLOW_PROMPT = `You keep the workflow memory of a voice assistant's backend, as a folder tree under "workflow/": reusable procedures for jobs it did with its tools, so the next time takes one step.
 
-You are given the work record: the tool calls the backend made (Composio tool slugs, Telegram, web search, plaid) with their arguments and results, and any run_code program it wrote. A procedure is worth keeping when it took more than one dependent step and succeeded, or when the caller said how they want a kind of task done in future.
+You are given the work record: the tool calls the backend made (Composio tool slugs, Telegram, web search, plaid) with their arguments and results, and any run_code program it wrote. A procedure is worth keeping when a job with their apps succeeded and they might ask to do it again — posting to LinkedIn, sending a Telegram, creating and sharing a doc. One successful tool call is enough.
 
 ${SHARED_RULES}
-- Path: workflow/<app or domain>/<task>, e.g. workflow/google-docs/create-and-send-on-telegram.
+- Path: workflow/<app or domain>/<task>, e.g. workflow/google-docs/create-and-share, workflow/linkedin/create-post, workflow/telegram/send-message.
 - Content: the trigger (when to use it), the steps in order, the tool slugs, and what to watch out for (the shape of a result, an argument that must be exact).
-- "tools": the tool slugs used. "inputs": the values that change per run (recipient, title, dates, message text).
+- "tools": the tool slugs used. "inputs": the values that change per run (recipient, title, dates, message text, post body).
 - "code": when a run_code program did the job, return it rewritten as a template: the body of an async function that reads its inputs from an \`inputs\` object (inputs.recipient, inputs.title ...) and never hard-codes a name, link, id or message from this run. Keep the working calls exactly as they were made. Otherwise null.
-- Record what the caller said about how they want the task done as part of the content.
-- A workflow is about the job, not the people in it. Never put a person's name, email, phone number or handle in a workflow, and never an example from this run; those belong to personal memory, which is kept separately. Where the job needs a recipient, the step reads "use the recipient's contact from personal memory; ask only if it is not there". When updating an existing workflow that contains such details, remove them.`;
+- Record what the caller said about how they want the task done as part of the content (tone, "just post it, don't read it back").
+- A workflow is the recipe, not the diary of this run. Never put a person's name, email, phone, handle, a real post body, a real doc title, or "the caller sent …" in a workflow. An example is a pattern ("a short news summary", "the title they asked for"), not what happened today. Where the job needs a recipient, the step reads "use the recipient's contact from personal memory; ask only if it is not there". When updating an existing workflow that contains such details, remove them.`;
 
 function userContent(input: WriterInput): string {
   const sections = [

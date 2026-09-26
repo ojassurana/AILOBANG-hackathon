@@ -653,9 +653,10 @@ export class VoiceAgent extends Agent<Env> {
         content: result.text,
       });
       this.notify({ type: "working", note: null });
-      // A job just done with tools is the moment a workflow is worth keeping:
-      // the program that ran and the slugs it used are all in this run's record.
-      if (result.steps.length) this.keepMemory("delegation", harness.lastWork());
+      // Jev looks at every turn, not only ones that used tools: a preference can
+      // land without a job, and a one-step job (a LinkedIn post, a Telegram) is
+      // still a workflow worth keeping.
+      this.keepMemory("delegation", harness.lastWork());
     } catch (error) {
       console.error("voice agent: harness failed", error);
       this.notify({ type: "error", message: "The connector lookup failed." });

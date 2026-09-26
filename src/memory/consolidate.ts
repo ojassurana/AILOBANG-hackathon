@@ -73,10 +73,11 @@ export async function consolidate(deps: ConsolidateDeps, input: ConsolidateInput
       workflow: {
         type: "noul",
         instructions:
-          "`work_record` shows a job with the caller's apps that took more than one dependent step and succeeded, or the caller said how a kind of job should be done from now on.",
+          "`work_record` shows a job with the caller's apps that succeeded and they might ask to do again: " +
+          "post, send, share, create, look up and act. One tool call is enough. Do not wait for two steps.",
         criteria: {
-          true: "A reusable multi-step procedure or a standing instruction about how to do a kind of job.",
-          false: "No tools were used, a single simple action, a failed attempt, or a question answered from live data.",
+          true: "A successful action on their apps, or they said how a kind of job should be done from now on.",
+          false: "No tools were used, the action failed, or it was only a question answered from live data.",
         },
       },
       both: {
