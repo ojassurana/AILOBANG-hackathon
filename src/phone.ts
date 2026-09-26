@@ -2,10 +2,8 @@
  * Linking a phone number to an account, and finding the account behind a call.
  *
  * A number is proven by a six-digit code read out in a call from the site's
- * Telnyx number.
- * Once linked it stays linked: a call from that number reaches the owner's
- * voice agent and, through it, their connected accounts, so the link is not
- * something to hand out or swap casually.
+ * Telnyx number. A call from a linked number reaches the owner's voice agent
+ * and, through it, their connected accounts, until the owner unlinks it.
  */
 
 import type { Env } from "./env";
@@ -166,7 +164,7 @@ export async function sendLinkCode(env: Env, userId: string, input: string): Pro
   return { ok: true };
 }
 
-/** Checks the typed code and, if it matches, links the number for good. */
+/** Checks the typed code and, if it matches, links the number. */
 export async function confirmLinkCode(env: Env, userId: string, input: string): Promise<PhoneResult> {
   const code = input.replace(/\D/g, "");
   const row = await env.DB.prepare(
@@ -212,6 +210,11 @@ export async function confirmLinkCode(env: Env, userId: string, input: string): 
   }
 
   return { ok: true };
+}
+
+/** Removes the user's linked number, so calls from it are no longer answered. */
+export async function unlinkPhone(db: D1Database, userId: string): Promise<void> {
+  await db.prepare("DELETE FROM phone_links WHERE user_id = ?").bind(userId).run();
 }
 
 /** Drops the code the user was waiting on, so they can enter a different number. */

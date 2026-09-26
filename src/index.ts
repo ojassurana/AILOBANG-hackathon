@@ -41,6 +41,7 @@ import type { Env } from "./env";
 import { calledNumber, incomingCall, verifyWebhook } from "./openai-webhook";
 import {
   cancelLinkCode,
+  unlinkPhone,
   confirmLinkCode,
   formatPhone,
   getPhoneLink,
@@ -50,6 +51,7 @@ import {
   type PhoneLink,
 } from "./phone";
 import { renderPhonePage } from "./phone-page";
+import { callWidget } from "./call-widget";
 import { getAgentByName, routeAgentRequest } from "agents";
 
 export { VoiceAgent } from "./voice-agent";
@@ -147,7 +149,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return openaiWebhook(request, env);
   }
 
-  if (path === "/phone/start" || path === "/phone/verify" || path === "/phone/restart") {
+  if (path === "/phone/start" || path === "/phone/verify" || path === "/phone/restart" || path === "/phone/unlink") {
     if (request.method !== "POST") return methodNotAllowed("POST");
     return phoneAction(request, env, path);
   }
@@ -411,14 +413,18 @@ async function phoneScreen(
   const pending = link ? null : await pendingCode(env.DB, session.sub);
   const url = new URL(request.url);
   const justLinked = url.searchParams.get("linked") === "1" && link !== null;
+  const justUnlinked = url.searchParams.get("unlinked") === "1" && link === null;
 
   const html = renderPhonePage({
     email: session.email,
+    userId: session.sub,
     link,
     pending,
     callNumber: env.TELNYX_PHONE_NUMBER,
     welcome: problem?.welcome ?? url.searchParams.get("welcome") === "1",
-    notice: problem?.notice ?? (justLinked ? "Your number is linked." : null),
+    notice:
+      problem?.notice ??
+      (justLinked ? "Your number is linked." : justUnlinked ? "Your number is unlinked." : null),
     noticeTone: problem ? "bad" : "ok",
   });
   return new Response(html, {
@@ -459,6 +465,11 @@ async function phoneAction(request: Request, env: Env, path: string): Promise<Re
   if (path === "/phone/restart") {
     await cancelLinkCode(env.DB, session.sub);
     return seeOther(next, request);
+  }
+
+  if (path === "/phone/unlink") {
+    await unlinkPhone(env.DB, session.sub);
+    return seeOther("/phone?unlinked=1", request);
   }
 
   if (path === "/phone/start") {
@@ -729,7 +740,7 @@ async function telegramScreen(
 
   const status = (await telegramStatus(env, session.sub)) ?? neverConnected;
 
-  return new Response(renderTelegramPage({ email: session.email, status, notice }), {
+  return new Response(renderTelegramPage({ email: session.email, userId: session.sub, status, notice }), {
     headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
   });
 }
@@ -1209,6 +1220,7 @@ ${rows}
       </a>
 ${phoneCard(phone, callNumber)}
     </div>
+${callWidget(session.sub)}
   </body>
 </html>`;
 }
@@ -1224,7 +1236,7 @@ function phoneCard(phone: PhoneLink | null, callNumber: string): string {
     : `<span class="nm">Call from your phone</span>
             <span class="psub">Link your number and call Ailobang at ${number}.</span>`;
   const action = phone
-    ? `<span class="pill"><span class="dot ok"></span>Linked</span>`
+    ? `<a class="btn ghost" href="/phone">Manage</a>`
     : `<a class="btn ghost" href="/phone">Link phone</a>`;
 
   return `      <div class="card phone">

@@ -2,14 +2,17 @@
  * The phone screen: link a number with a code read out in a call so the owner can call in.
  *
  * Optional, and offered once right after sign-in. Like the Telegram screen it is
- * plain forms with no script, and the step shown comes from what is stored — a
- * pending code or a finished link — rather than from the URL.
+ * plain forms, and the step shown comes from what is stored — a pending code or
+ * a finished link — rather than from the URL.
  */
 
+import { callWidget } from "./call-widget";
 import { formatPhone, type PendingCode, type PhoneLink } from "./phone";
 
 export interface PhonePageOptions {
   email: string;
+  /** Whose calls the live-call widget follows. */
+  userId: string;
   link: PhoneLink | null;
   pending: PendingCode | null;
   /** The number people call, in E.164. */
@@ -139,6 +142,7 @@ export function renderPhonePage(options: PhonePageOptions): string {
         text-decoration: underline;
         cursor: pointer;
       }
+      .unlink { margin: 18px 0 0; padding-top: 16px; border-top: 1px solid var(--border); }
       .back { margin-top: 22px; font-size: 13.5px; }
       .back a { color: var(--muted); }
       @media (max-width: 560px) {
@@ -168,6 +172,7 @@ ${renderStep(options)}
           : `<p class="back"><a href="/phone/skip">Skip for now</a></p>`
       }
     </div>
+${callWidget(options.userId)}
   </body>
 </html>`;
 }
@@ -185,11 +190,14 @@ function renderStep({ link, pending, callNumber, welcome, notice, noticeTone }: 
         <span class="number"><a href="tel:${escapeHtml(callNumber)}">${escapeHtml(number)}</a></span>
         <p class="lede">It's the same assistant as a call on the site, with the same connected accounts.
         Calls from any other number won't be answered.</p>
-        <p class="hint">A linked number is permanent and can't be removed or changed.</p>
         <div class="actions">
           <a class="btn" href="/app">Done</a>
           <a class="btn ghost" href="/call">Call from the site</a>
-        </div>`;
+        </div>
+        <form class="unlink" method="post" action="/phone/unlink"
+              onsubmit="return confirm('Unlink ${escapeHtml(formatPhone(link.phone))}? Calls from it will stop reaching your accounts.')">
+          <button class="link" type="submit">Unlink this number</button>
+        </form>`;
   }
 
   if (pending) {
@@ -203,7 +211,7 @@ function renderStep({ link, pending, callNumber, welcome, notice, noticeTone }: 
           <label for="code">Code from the call</label>
           <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8"
                  pattern="[0-9 ]*" autofocus required />
-          <p class="hint">Once you confirm, this number is linked for good. It can't be removed or changed later.</p>
+          <p class="hint">You can unlink it later from this page.</p>
           <div class="actions">
             <button class="btn" type="submit">Link this number</button>
             <button class="link" type="submit" formaction="/phone/start" formnovalidate
@@ -224,7 +232,7 @@ function renderStep({ link, pending, callNumber, welcome, notice, noticeTone }: 
           <label for="phone">Your phone number</label>
           <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
                  placeholder="+1 415 555 0123" required />
-          <p class="hint">Include the country code. A linked number is permanent and can't be removed or changed.</p>
+          <p class="hint">Include the country code. You can unlink it any time.</p>
           <div class="actions">
             <button class="btn" type="submit">Call me with a code</button>
           </div>

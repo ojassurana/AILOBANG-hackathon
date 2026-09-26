@@ -7,20 +7,23 @@
  * a refresh, a back button, or a second tab all land on the step that is
  * actually pending.
  *
- * Plain forms, no script: every step is a POST that redirects back here, and the
- * browser's own `required` and `autocomplete` do the input work.
+ * Plain forms: every step is a POST that redirects back here, and the browser's
+ * own `required` and `autocomplete` do the input work.
  */
 
+import { callWidget } from "./call-widget";
 import type { TelegramStatus } from "./telegram";
 
 export interface TelegramPageOptions {
   email: string;
+  /** Whose calls the live-call widget follows. */
+  userId: string;
   status: TelegramStatus;
   /** A sentence to show in place of whatever the login recorded. */
   notice?: string | null;
 }
 
-export function renderTelegramPage({ email, status, notice }: TelegramPageOptions): string {
+export function renderTelegramPage({ email, userId, status, notice }: TelegramPageOptions): string {
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -158,6 +161,7 @@ ${renderStep(status, notice ?? null)}
       </div>
       <p class="back"><a href="/app">Back to your accounts</a></p>
     </div>
+${callWidget(userId)}
   </body>
 </html>`;
 }

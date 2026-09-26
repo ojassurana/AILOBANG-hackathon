@@ -6,6 +6,7 @@
  * reasoning, tool calls and account access happen server-side in the agent.
  */
 
+import { callWidget } from "./call-widget";
 import { formatPhone } from "./phone";
 
 export interface CallPageOptions {
@@ -609,6 +610,7 @@ ${phoneLine(phone)}
         }, 10000);
       })();
     </script>
+${callWidget(userId, { phoneOnly: true })}
   </body>
 </html>`;
 }

@@ -43,6 +43,7 @@ const base: TelegramStatus = {
 function screen(status: Partial<TelegramStatus>, notice?: string): string {
   return renderTelegramPage({
     email: "caller@example.com",
+    userId: "user_test",
     status: { ...base, ...status },
     notice,
   });

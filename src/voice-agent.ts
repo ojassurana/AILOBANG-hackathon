@@ -55,6 +55,11 @@ const START_TIMEOUT_MS = 8000;
 const MAX_QUEUED_DELEGATIONS = 3;
 /** `WebSocket.readyState` for an open socket. */
 const OPEN = 1;
+/** Connection tags: a call page's socket, or the live-call widget following along. */
+const CALLER_TAG = "caller";
+const WATCH_TAG = "watch";
+
+export type CallChannel = "site" | "phone";
 
 interface TranscriptLine {
   role: "user" | "assistant";
@@ -84,11 +89,34 @@ export class VoiceAgent extends Agent<Env> {
    */
   private phoneSessionId: string | null = null;
 
+  /** Call-page sockets. The live-call widget's sockets only watch, and don't count. */
   private connectionCount(): number {
-    return [...this.getConnections()].length;
+    return [...this.getConnections(CALLER_TAG)].length;
+  }
+
+  /** The widget's sockets, which must not be sent the call's audio. */
+  private watcherIds(): string[] {
+    return [...this.getConnections(WATCH_TAG)].map((connection) => connection.id);
+  }
+
+  getConnectionTags(_connection: Connection, context: ConnectionContext): string[] {
+    return new URL(context.request.url).searchParams.get("watch") === "1" ? [WATCH_TAG] : [CALLER_TAG];
+  }
+
+  /** Which call is on right now, if any: the widget shows it and the call page avoids it. */
+  private channel(): CallChannel | null {
+    if (this.live?.readyState !== OPEN || !this.liveReady) return null;
+    return this.phoneSessionId ? "phone" : "site";
   }
 
   async onConnect(connection: Connection, _context: ConnectionContext): Promise<void> {
+    // A watcher only follows along. It gets the call so far and then the same
+    // transcript broadcasts as the call page, and never starts a session.
+    if (connection.tags.includes(WATCH_TAG)) {
+      connection.send(JSON.stringify({ type: "watch", channel: this.channel(), lines: this.transcript }));
+      return;
+    }
+
     // A caller returning within the grace window resumes the call in flight.
     if (this.teardownTimer) {
       clearTimeout(this.teardownTimer);
@@ -120,8 +148,8 @@ export class VoiceAgent extends Agent<Env> {
     }
   }
 
-  onMessage(_connection: Connection, message: WSMessage): void {
-    if (this.onPhone()) return;
+  onMessage(connection: Connection, message: WSMessage): void {
+    if (this.onPhone() || connection.tags.includes(WATCH_TAG)) return;
 
     if (typeof message !== "string") {
       this.appendAudio(toBytes(message));
@@ -139,7 +167,8 @@ export class VoiceAgent extends Agent<Env> {
     // "ping" needs no reply: it exists so the caller's socket is never idle.
   }
 
-  onClose(): void {
+  onClose(connection: Connection): void {
+    if (connection.tags.includes(WATCH_TAG)) return;
     const remaining = this.connectionCount();
     console.log("voice agent: caller disconnected", JSON.stringify({ remaining }));
     if (remaining > 0 || this.onPhone()) return;
@@ -196,7 +225,7 @@ export class VoiceAgent extends Agent<Env> {
     setTimeout(() => {
       if (this.live === socket && !this.liveReady) {
         console.error("voice agent: session start timed out");
-        this.broadcast(JSON.stringify({ type: "error", message: "The call didn't start. Please try again." }));
+        this.notify({ type: "error", message: "The call didn't start. Please try again." });
         this.onLiveClosed("session start timed out");
       }
     }, START_TIMEOUT_MS);
@@ -237,6 +266,7 @@ export class VoiceAgent extends Agent<Env> {
       this.bindLive(socket);
       this.liveReady = true;
       console.log("voice agent: phone call attached");
+      this.notify({ type: "call", state: "live", channel: "phone" });
       this.greet();
       return "accepted";
     } catch (error) {
@@ -319,11 +349,23 @@ export class VoiceAgent extends Agent<Env> {
       "voice agent: session ended",
       JSON.stringify({ reason, callerStillHere, phone: this.phoneSessionId !== null }),
     );
+    this.notify({ type: "call", state: "ended", reason });
     this.live = null;
     this.liveReady = false;
     this.harness = null;
     this.phoneSessionId = null;
-    this.broadcast(JSON.stringify({ type: "call", state: "ended", reason }));
+  }
+
+  /**
+   * Tells the open pages about the call. While the phone has it, only the
+   * widget hears: a call page there has no call of its own to update.
+   */
+  private notify(message: Record<string, unknown>): void {
+    this.broadcast(JSON.stringify(message), this.phoneSessionId ? this.callerIds() : undefined);
+  }
+
+  private callerIds(): string[] {
+    return [...this.getConnections(CALLER_TAG)].map((connection) => connection.id);
   }
 
   private onLiveEvent(data: unknown): void {
@@ -339,14 +381,14 @@ export class VoiceAgent extends Agent<Env> {
     switch (event.type) {
       case "session.started":
         this.liveReady = true;
-        this.broadcast(JSON.stringify({ type: "call", state: "live" }));
+        this.notify({ type: "call", state: "live", channel: this.phoneSessionId ? "phone" : "site" });
         this.greet();
         break;
 
       case "session.output_audio.delta":
         // On a phone call this is the sideband's copy of what SIP already
         // played; an open call page must not play it a second time.
-        if (!this.phoneSessionId) this.broadcast(b64decode(String(event.delta ?? "")));
+        if (!this.phoneSessionId) this.broadcast(b64decode(String(event.delta ?? "")), this.watcherIds());
         break;
 
       case "session.input_transcript.delta":
@@ -362,21 +404,17 @@ export class VoiceAgent extends Agent<Env> {
         break;
 
       case "session.usage.updated":
-        this.broadcast(JSON.stringify({ type: "usage", seconds: event.usage?.seconds ?? null }));
+        this.notify({ type: "usage", seconds: event.usage?.seconds ?? null });
         break;
 
       case "session.closed":
-        this.broadcast(
-          JSON.stringify({ type: "call", state: "ended", seconds: event.usage?.seconds ?? null }),
-        );
+        this.notify({ type: "call", state: "ended", seconds: event.usage?.seconds ?? null });
         this.onLiveClosed("gpt-live ended the session");
         break;
 
       case "error":
         console.error("voice agent: live error", JSON.stringify(event.error));
-        this.broadcast(
-          JSON.stringify({ type: "error", message: event.error?.message ?? "The call hit an error." }),
-        );
+        this.notify({ type: "error", message: event.error?.message ?? "The call hit an error." });
         break;
 
       default:
@@ -485,7 +523,7 @@ export class VoiceAgent extends Agent<Env> {
       // Step notes go to the page only: GPT-Live speaks the thinking it is
       // handed, and by the time it does, the step it names is long finished.
       const result = await harness.run(transcript, (note) => {
-        this.broadcast(JSON.stringify({ type: "working", note }));
+        this.notify({ type: "working", note });
       });
 
       this.sendLive({
@@ -494,10 +532,10 @@ export class VoiceAgent extends Agent<Env> {
         delegation_id: delegationId,
         content: result.text,
       });
-      this.broadcast(JSON.stringify({ type: "working", note: null }));
+      this.notify({ type: "working", note: null });
     } catch (error) {
       console.error("voice agent: harness failed", error);
-      this.broadcast(JSON.stringify({ type: "error", message: "The connector lookup failed." }));
+      this.notify({ type: "error", message: "The connector lookup failed." });
       this.note(delegationId, "I couldn't reach the connected accounts just now. Please try that again.");
     }
   }
@@ -545,7 +583,7 @@ export class VoiceAgent extends Agent<Env> {
     if (last?.role === role) last.text += delta;
     else this.transcript.push({ role, text: delta });
 
-    this.broadcast(JSON.stringify({ type: "transcript", role, delta }));
+    this.notify({ type: "transcript", role, delta });
   }
 
   private transcriptText(): string {

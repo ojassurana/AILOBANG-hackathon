@@ -10,6 +10,7 @@
  */
 
 import assert from "node:assert/strict";
+import { callWidget } from "../src/call-widget";
 import { calledNumber, incomingCall, verifyWebhook } from "../src/openai-webhook";
 import { formatPhone, normalizePhone, phoneFromSipHeader } from "../src/phone";
 import { renderPhonePage, type PhonePageOptions } from "../src/phone-page";
@@ -162,18 +163,20 @@ check("a call is ours only when a header other than From names our number", () =
 
 const base: PhonePageOptions = {
   email: "caller@example.com",
+  userId: "user_test",
   link: null,
   pending: null,
   callNumber: "+14073580773",
   welcome: false,
 };
 
-check("a fresh screen asks for a number and says the link is permanent", () => {
+check("a fresh screen asks for a number and says it can be unlinked", () => {
   const html = renderPhonePage(base);
   assert.match(html, /action="\/phone\/start"/);
   assert.match(html, /name="phone"/);
   assert.match(html, /\+1 407 358 0773/);
-  assert.match(html, /permanent/);
+  assert.match(html, /unlink it any time/);
+  assert.doesNotMatch(html, /permanent/);
   assert.doesNotMatch(html, /name="code"/);
 });
 
@@ -196,18 +199,30 @@ check("a pending code asks for the code, and offers a resend and a different num
   assert.doesNotMatch(html, /type="tel"/);
 });
 
-check("a linked number shows what to dial and offers no way to unlink", () => {
+check("a linked number shows what to dial and can be unlinked after a confirm", () => {
   const html = renderPhonePage({ ...base, link: { phone: "+6591234567", linkedAt: "2026-09-26T00:00:00Z" } });
   assert.match(html, /href="tel:\+14073580773"/);
   assert.match(html, /\+6591234567/);
-  assert.doesNotMatch(html, /<form/);
-  assert.doesNotMatch(html, /[Uu]nlink/);
+  assert.match(html, /<form[^>]*action="\/phone\/unlink"[^>]*onsubmit="return confirm\(/);
+  assert.doesNotMatch(html, /name="code"|name="phone"/);
 });
 
 check("a notice is escaped rather than trusted", () => {
   const html = renderPhonePage({ ...base, notice: '<img src=x onerror="alert(1)">' });
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&lt;img src=x/);
+});
+
+check("every phone screen carries the live-call widget, watching this user's agent", () => {
+  const html = renderPhonePage(base);
+  assert.match(html, /id="alb-cw"[^>]*hidden/);
+  assert.match(html, /var USER_ID = "user_test";/);
+  assert.match(html, /\?watch=1/);
+  assert.match(html, /var PHONE_ONLY = false;/);
+});
+
+check("on the call page the widget only follows phone calls", () => {
+  assert.match(callWidget("user_test", { phoneOnly: true }), /var PHONE_ONLY = true;/);
 });
 
 check("the code call reads each digit, twice", () => {

@@ -16,8 +16,8 @@ Live at **https://ailobang.com**
 | `GET /app` | The post-login **Connect your accounts** page; redirects to `/signin` when signed out |
 | `GET /call` | The call page (a microphone, live transcript, and the voice agent behind them) |
 | `GET /agents/voice-agent/<user id>` | The voice agent's WebSocket; the session cookie decides which agent a caller may reach |
-| `GET /phone` | Link a phone number with a code read out in a call (optional; offered once after sign-in). Links are permanent |
-| `POST /phone/start`, `/phone/verify`, `/phone/restart` | Call with a code, check it, or start over with another number |
+| `GET /phone` | Link a phone number with a code read out in a call (optional; offered once after sign-in) |
+| `POST /phone/start`, `/phone/verify`, `/phone/restart`, `/phone/unlink` | Call with a code, check it, start over with another number, or unlink the linked one |
 | `GET /phone/skip` | Skips the post-sign-in phone step and goes to `/app` |
 | `POST /openai/webhook` | OpenAI's `live.transport.incoming` webhook: a call to the US number from a linked number is accepted by that user's voice agent |
 | `GET /connect/<toolkit>` | Creates a Composio Connect Link for that toolkit and redirects to it |
@@ -75,6 +75,14 @@ number; the webhook uses that to tell these calls from the project's other numbe
 `live.transport.incoming` to `/openai/webhook`, the Worker matches the caller's `From` number to a
 linked user, and that user's `VoiceAgent` accepts the call and attaches a sideband socket to run
 delegations.
+
+A user has one call at a time. A phone call that arrives during a site call is refused as busy, and
+the call page won't start while the phone has the call; that call's events go only to watchers.
+
+Every signed-in page carries the live-call widget (`src/call-widget.ts`): a draggable, collapsible
+panel that opens `/agents/voice-agent/<user id>?watch=1`. The agent tags that socket `watch`, sends
+it `{type:"watch", channel, lines}` with the call so far, then the same transcript broadcasts as the
+call page, never audio. The widget shows while a call is on; on `/call` itself only for phone calls.
 
 Link codes are read out in an outbound call from the same number, placed through the Telnyx TeXML
 app `ailobang-phone-codes` (`TELNYX_TEXML_APP_ID`) with the TeXML sent inline. They aren't texted:
