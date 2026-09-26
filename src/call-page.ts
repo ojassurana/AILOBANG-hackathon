@@ -122,7 +122,24 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
         box-shadow: var(--shadow);
         overflow: hidden;
       }
-      .card h2 { margin: 0; padding: 14px 18px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--border); }
+      .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); }
+      .card h2 { margin: 0; padding: 14px 18px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+      .actions { display: flex; gap: 6px; padding-right: 12px; }
+      .action {
+        appearance: none;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 550;
+        padding: 5px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition: color 0.12s ease, border-color 0.12s ease;
+      }
+      .action:hover { color: var(--fg); border-color: var(--fg); }
+      .action[data-done="1"] { color: var(--ok); border-color: var(--ok); }
       .log { padding: 14px 18px 18px; max-height: 320px; overflow-y: auto; }
       .log p { margin: 0 0 10px; font-size: 14.5px; }
       .log p:last-child { margin-bottom: 0; }
@@ -159,7 +176,13 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
       </div>
 
       <div class="card">
-        <h2>Transcript</h2>
+        <div class="card-head">
+          <h2>Transcript</h2>
+          <div class="actions">
+            <button class="action" id="copy" type="button" hidden>Copy</button>
+            <button class="action" id="download" type="button" hidden>Download</button>
+          </div>
+        </div>
         <div class="log" id="log"><p class="empty">Nothing yet. The conversation shows up here as you talk.</p></div>
       </div>
     </div>
@@ -180,6 +203,8 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
         var noteEl = document.getElementById("note");
         var errorEl = document.getElementById("error");
         var logEl = document.getElementById("log");
+        var copyBtn = document.getElementById("copy");
+        var downloadBtn = document.getElementById("download");
 
         var socket = null;
         var context = null;
@@ -230,7 +255,73 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
             p.appendChild(body);
             logEl.appendChild(p);
           }
+          copyBtn.hidden = false;
+          downloadBtn.hidden = false;
           logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        /* -------------------------------------------------------- transcript */
+
+        function transcriptText() {
+          var lines = [];
+          var nodes = logEl.querySelectorAll("p[data-role]");
+          for (var i = 0; i < nodes.length; i++) {
+            var label = nodes[i].getAttribute("data-role") === "user" ? "You" : "Assistant";
+            lines.push(label + ": " + nodes[i].querySelector(".text").textContent.trim());
+          }
+          return lines.join("\\n\\n");
+        }
+
+        /** The clipboard API needs a secure context and a granted permission. */
+        function legacyCopy(text) {
+          var area = document.createElement("textarea");
+          area.value = text;
+          area.setAttribute("readonly", "");
+          area.style.position = "fixed";
+          area.style.top = "-1000px";
+          document.body.appendChild(area);
+          area.select();
+          var ok = false;
+          try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+          area.remove();
+          return ok;
+        }
+
+        var flashTimers = new WeakMap();
+
+        function flash(button, label, tone) {
+          var restore = button.textContent;
+          button.textContent = label;
+          button.dataset.done = tone || "";
+          clearTimeout(flashTimers.get(button));
+          flashTimers.set(button, setTimeout(function () {
+            button.textContent = restore;
+            button.dataset.done = "";
+          }, 1600));
+        }
+
+        async function copyTranscript() {
+          var text = transcriptText();
+          if (!text) return;
+          var ok = false;
+          try { await navigator.clipboard.writeText(text); ok = true; }
+          catch (e) { ok = legacyCopy(text); }
+          flash(copyBtn, ok ? "Copied" : "Copy failed", ok ? "1" : "");
+        }
+
+        function downloadTranscript() {
+          var text = transcriptText();
+          if (!text) return;
+          var stamp = new Date().toISOString().slice(0, 10);
+          var blob = new Blob([text + "\\n"], { type: "text/plain;charset=utf-8" });
+          var url = URL.createObjectURL(blob);
+          var link = document.createElement("a");
+          link.href = url;
+          link.download = "ailobang-transcript-" + stamp + ".txt";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 0);
         }
 
         function startTimer() {
@@ -454,6 +545,9 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
           if (state === "live") hangUp();
           else if (state === "idle" || state === "ended") start();
         });
+
+        copyBtn.addEventListener("click", copyTranscript);
+        downloadBtn.addEventListener("click", downloadTranscript);
 
         window.addEventListener("pagehide", function () {
           if (socket && socket.readyState === 1) socket.send(JSON.stringify({ type: "hangup" }));
