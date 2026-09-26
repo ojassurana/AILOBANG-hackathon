@@ -15,7 +15,9 @@ Live at **https://ailobang.com**
 | `GET /callback` | Exchanges the WorkOS code, upserts the user in D1, sets the session cookie |
 | `GET /app` | The post-login **Connect your accounts** page; redirects to `/signin` when signed out |
 | `GET /call` | The call page (a microphone, live transcript, and the voice agent behind them) |
+| `GET /code` | Coding chat (text). Separate `CodingAgent` DO — not the voice agent |
 | `GET /agents/voice-agent/<user id>` | The voice agent's WebSocket; the session cookie decides which agent a caller may reach |
+| `GET /agents/coding-agent/<user id>` | Coding chat WebSocket + `get-messages`; same cookie gate |
 | `GET /connect/<toolkit>` | Creates a Composio Connect Link for that toolkit and redirects to it |
 | `GET /connect/return/<toolkit>` | Composio's callback; returns the browser to `/app?connected=<toolkit>` |
 | `POST /disconnect/<toolkit>` | Disconnects that toolkit: deletes the user's Composio connection(s) for it |

@@ -35,14 +35,15 @@ import {
   type ConnectedAccount,
 } from "./composio";
 import { renderCallPage } from "./call-page";
+import { renderCodingPage } from "./coding-page";
 import { renderTelegramPage } from "./telegram-page";
 import type { TelegramStatus } from "./telegram";
 import type { Env } from "./env";
 import { routeAgentRequest } from "agents";
 
 export { VoiceAgent } from "./voice-agent";
-// Both classes are named in wrangler.jsonc migrations, and a migrated class is
-// only resolvable if the Worker entry actually exports it.
+export { CodingAgent } from "./coding-agent";
+// Migrated classes are only resolvable if the Worker entry actually exports them.
 export { TelegramSession } from "./telegram";
 
 const WORKOS_API = "https://api.workos.com";
@@ -52,6 +53,8 @@ const WORKOS_API = "https://api.workos.com";
  * that binding is renamed, this has to move with it or calls stop routing.
  */
 const VOICE_AGENT_ROUTE = "voice-agent";
+const CODING_AGENT_ROUTE = "coding-agent";
+const PUBLIC_AGENT_ROUTES = new Set([VOICE_AGENT_ROUTE, CODING_AGENT_ROUTE]);
 const SESSION_COOKIE = "alb_session";
 const PKCE_COOKIE = "alb_pkce";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
@@ -100,10 +103,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   // session cookie decides who may reach which agent.
   if (path.startsWith("/agents/")) {
     // routeAgentRequest exposes every Durable Object binding, not just the
-    // agents: adding one silently adds a route named after it. Only the voice
-    // agent has a public surface, so anything else is a 404 here.
+    // agents: adding one silently adds a route named after it. Only voice and
+    // coding chat have a public surface; Telegram's DO stays 404 here.
     const [, , namespace] = path.split("/");
-    if (namespace !== VOICE_AGENT_ROUTE) return new Response("Not found", { status: 404 });
+    if (!PUBLIC_AGENT_ROUTES.has(namespace)) return new Response("Not found", { status: 404 });
 
     const session = await currentSession(request, env);
     if (!session) return new Response("Unauthorized", { status: 401 });
@@ -154,6 +157,8 @@ async function route(request: Request, env: Env): Promise<Response> {
       return telegramScreen(request, env);
     case "/call":
       return callPage(request, env);
+    case "/code":
+      return codingPage(request, env);
     case "/auth/logout":
       return logout(request, env);
     case "/favicon.svg":
@@ -333,6 +338,16 @@ async function callPage(request: Request, env: Env): Promise<Response> {
   if (!session) return redirect("/signin", request);
 
   return new Response(renderCallPage({ email: session.email, userId: session.sub }), {
+    headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/** Text coding chat: AIChatAgent, not the voice call. */
+async function codingPage(request: Request, env: Env): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  return new Response(renderCodingPage({ email: session.email, userId: session.sub }), {
     headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
   });
 }
@@ -849,6 +864,7 @@ function renderConnectionsPage(
         text-decoration: none;
         box-shadow: var(--shadow);
       }
+      .modes { display: grid; gap: 12px; }
       .call:hover { opacity: 0.92; }
       .callicon {
         flex: none;
@@ -987,6 +1003,7 @@ ${rows}
         </table>
       </div>
       <p class="soon">More connectors coming soon</p>
+      <div class="modes">
       <a class="call" href="/call">
         <span class="callicon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -1002,6 +1019,23 @@ ${rows}
         </span>
         <span class="callgo">Start call</span>
       </a>
+      <a class="call" href="/code">
+        <span class="callicon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 6h8" />
+            <path d="M8 12h8" />
+            <path d="M8 18h5" />
+            <path d="M5 4h14v16H5z" />
+          </svg>
+        </span>
+        <span class="calltext">
+          <span class="calltitle">Coding chat</span>
+          <span class="callsub">Text chat for writing and debugging code. Separate from voice.</span>
+        </span>
+        <span class="callgo">Open chat</span>
+      </a>
+      </div>
     </div>
   </body>
 </html>`;

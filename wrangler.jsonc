@@ -26,6 +26,10 @@
       {
         "name": "TELEGRAM_SESSION",
         "class_name": "TelegramSession"
+      },
+      {
+        "name": "CODING_AGENT",
+        "class_name": "CodingAgent"
       }
     ]
   },
@@ -37,6 +41,10 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["TelegramSession"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["CodingAgent"]
     }
   ],
   "vars": {
