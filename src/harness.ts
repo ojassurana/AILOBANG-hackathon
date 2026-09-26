@@ -60,13 +60,15 @@ order and say what you are doing at each stage:
 1. Write the document first with a Google Docs tool, so the caller can open it
    while the rest happens.
 2. Then call humanize_and_check with the text you just wrote. It rewrites the
-   text, runs an AI detector, and escalates until the detector reports the text
-   as human. It returns the final text and what each pass scored.
+   text, scores how formulaic it still reads, and escalates until the score
+   clears. It returns the final text and what each pass scored.
 3. Then write the final text back into the same document, replacing the old body:
    delete the existing content range, then insert the returned text.
-Never tell the caller the text was humanized unless humanize_and_check says a
-detector confirmed it. If it reports that no detector could score the text, say
-that plainly instead.
+The score is a writing measure computed in our own worker. It is not a detector
+verdict and it is not the tool a university would run, so never promise the
+caller that anything will pass a checker. Say the writing was cleaned up and
+that it scored clear of the measure. If no score could be produced, say that
+plainly instead of implying success.
 
 ## Return the result
 Answer in at most 60 words of plain conversational text, with no markdown, no
@@ -117,10 +119,9 @@ const HUMANIZE_TOOL: ToolSchema = {
   function: {
     name: "humanize_and_check",
     description:
-      "Rewrite text so it stops reading as AI-generated, then verify it with an AI detector, " +
-      "escalating to a stronger rewrite until the detector reports it as human. Use this after " +
-      "writing a document and before telling the caller it is finished. Returns the final text " +
-      "plus what each pass scored.",
+      "Rewrite text so it stops reading as formulaic AI prose, then score it and escalate to a " +
+      "stronger rewrite until the score clears. Use this after writing a document and before " +
+      "telling the caller it is finished. Returns the final text plus what each pass scored.",
     parameters: {
       type: "object",
       properties: {
@@ -273,10 +274,10 @@ export class ConnectorHarness {
         break;
       }
 
-      history.push(`pass ${pass} (${strategy}): ${detected.aiScore}% AI (${detected.source})`);
+      history.push(`pass ${pass} (${strategy}): scored ${detected.aiScore} (${detected.source})`);
       finalScore = detected.aiScore;
 
-      if (detected.aiScore === 0) {
+      if (detected.clean) {
         verified = true;
         onProgress("It reads as human-written now. Finished.");
         break;
@@ -284,13 +285,15 @@ export class ConnectorHarness {
     }
 
     const summary = verified
-      ? `Verified human-written by a detector after ${history.length} pass(es).`
+      ? `Cleared the AI-writing measure after ${history.length} pass(es).`
       : finalScore === null
-        ? "No detector could score this text, so it is unverified."
-        : `Still scoring ${finalScore}% AI after ${history.length} pass(es).`;
+        ? "No scorer could read this text, so it is unverified."
+        : `Still scoring ${finalScore} on the AI-writing measure after ${history.length} pass(es).`;
 
     return [
       summary,
+      "This is a formulaic-writing measure computed in our own worker, not a detector " +
+        "verdict, and not the tool a university would use.",
       `Passes: ${history.join("; ")}`,
       "The final text is between the markers. Nothing outside them is part of it.",
       "<<<FINAL_TEXT",

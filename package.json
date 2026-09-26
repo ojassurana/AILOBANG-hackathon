@@ -18,6 +18,7 @@
     "wrangler": "^4.135.0"
   },
   "dependencies": {
-    "agents": "^0.24.0"
+    "agents": "^0.24.0",
+    "ai-text-detector": "^1.0.8"
   }
 }
