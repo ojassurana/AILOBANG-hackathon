@@ -10,6 +10,11 @@
  * Composio's per-user MCP session exposes meta-tools rather than every app tool,
  * so the loop is: search for the right tool, read its schema, execute it, then
  * hand back one short spoken-friendly answer.
+ *
+ * One built-in tool here is scoped on purpose. humanize_and_check applies only to
+ * written documents the harness itself produced, never to the caller's own words,
+ * because the scorer it uses flags plain formal prose as machine-written and
+ * would damage honest writing while chasing that false reading.
  */
 
 import { chatWithTools, type ChatMessage, type ToolSchema } from "./deepseek";
@@ -26,7 +31,7 @@ const MAX_ANSWER_CHARS = 1500;
 /** A returned document has to survive intact for the write-back step. */
 const MAX_DOCUMENT_CHARS = 60000;
 
-const SYSTEM_PROMPT = `## Voice conversation context
+export const SYSTEM_PROMPT = `## Voice conversation context
 You are the backend for an assistant in a live voice call. You do not speak:
 you return one short, factual result that the voice assistant reads aloud.
 Transcripts can contain mistakes, unfinished phrases and corrections. Use the
@@ -54,9 +59,10 @@ question. If a search returns nothing useful, say so rather than guessing.
 Never invent a tool slug or an argument value you were not given. If the caller
 has not connected the account a request needs, say so plainly.
 
-## Writing a document, then humanizing it
-When the caller asks for an essay, report or any written document, do it in this
-order and say what you are doing at each stage:
+## Humanizing: essays and written documents only
+humanize_and_check exists for exactly one case: an essay, report, paper or other
+written document that YOU just wrote for the caller. For that case only, work in
+this order and say what you are doing at each stage:
 1. Write the document first with a Google Docs tool, so the caller can open it
    while the rest happens.
 2. Then call humanize_and_check with the text you just wrote. It rewrites the
@@ -64,6 +70,14 @@ order and say what you are doing at each stage:
    clears. It returns the final text and what each pass scored.
 3. Then write the final text back into the same document, replacing the old body:
    delete the existing content range, then insert the returned text.
+Never call humanize_and_check for anything else. Not for an email, not for a
+message, not for a caption or post, not for a summary you are about to read
+aloud, and above all never for text the caller wrote or pasted themselves.
+Rewriting a person's own words does not improve them. It flattens the voice that
+made them theirs, and the scorer below is biased against plain formal prose, so
+it would mark honest writing as machine-written and then grind it down chasing
+that false reading.
+
 The score is a writing measure computed in our own worker. It is not a detector
 verdict and it is not the tool a university would run, so never promise the
 caller that anything will pass a checker. Say the writing was cleaned up and
@@ -114,14 +128,15 @@ const WEB_SEARCH_TOOL: ToolSchema = {
  * Built in rather than exposed as a connector, for the same reason as web_search:
  * the harness owns the loop, and the voice agent should hear each stage.
  */
-const HUMANIZE_TOOL: ToolSchema = {
+export const HUMANIZE_TOOL: ToolSchema = {
   type: "function",
   function: {
     name: "humanize_and_check",
     description:
-      "Rewrite text so it stops reading as formulaic AI prose, then score it and escalate to a " +
-      "stronger rewrite until the score clears. Use this after writing a document and before " +
-      "telling the caller it is finished. Returns the final text plus what each pass scored.",
+      "Rewrite an ESSAY, report, paper or other written document so it stops reading as formulaic " +
+      "AI prose, then score it and escalate to a stronger rewrite until the score clears. Only for " +
+      "a document you just wrote yourself. Do NOT use this for emails, messages, captions, spoken " +
+      "summaries, or any text the caller wrote or supplied. Returns the final text and the scores.",
     parameters: {
       type: "object",
       properties: {

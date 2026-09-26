@@ -16,6 +16,7 @@
 
 import assert from "node:assert/strict";
 import { detectAi, detectHosted, detectLocally, extractPercent, isScoreable, looksLikeMock } from "../src/detector";
+import { HUMANIZE_TOOL, SYSTEM_PROMPT } from "../src/harness";
 import { strategyFor } from "../src/humanize";
 
 let passed = 0;
@@ -209,8 +210,42 @@ await check("looksLikeMock spots the sandbox body", () => {
   assert.equal(looksLikeMock(JSON.stringify({ summary: { ai: 12 } })), false);
 });
 
-console.log("\nescalation ladder");
+console.log("\nscope: documents the agent wrote, and nothing else");
 
+/** The gate is prompt-level, so these assertions guard it against silent widening. */
+const description = String(HUMANIZE_TOOL.function.description ?? "");
+
+await check("the tool schema itself says documents only", () => {
+  assert.match(description, /ESSAY|report|paper|document/i);
+  assert.match(description, /yourself|you just wrote/i);
+});
+
+await check("the tool schema refuses emails, messages and captions", () => {
+  assert.match(description, /do NOT use/i);
+  for (const forbidden of ["email", "message", "caption"]) {
+    assert.match(description, new RegExp(forbidden, "i"), `the schema should rule out ${forbidden}`);
+  }
+});
+
+await check("the system prompt says never to rewrite the caller's own words", () => {
+  assert.match(SYSTEM_PROMPT, /never for text the caller wrote or pasted themselves/i);
+});
+
+await check("the system prompt names the uses that are out of scope", () => {
+  for (const forbidden of ["email", "message", "caption", "summary"]) {
+    assert.match(SYSTEM_PROMPT, new RegExp(forbidden, "i"), `the prompt should rule out ${forbidden}`);
+  }
+});
+
+await check("the prompt still forbids promising the caller a passing check", () => {
+  assert.match(SYSTEM_PROMPT, /never promise the\s+caller that anything will pass a checker/i);
+});
+
+await check("the prompt states the score is not a detector verdict", () => {
+  assert.match(SYSTEM_PROMPT, /not a detector\s+verdict/i);
+});
+
+console.log("\nescalation ladder");
 await check("pass 1 is light, 2 is aggressive, 3+ is structural", () => {
   assert.equal(strategyFor(1).strategy, "light");
   assert.equal(strategyFor(2).strategy, "aggressive");
