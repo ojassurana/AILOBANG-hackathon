@@ -50,9 +50,9 @@ export function renderMemoryPage({ email, connected, error }: MemoryPageOptions)
       .count { font-size: 12px; font-weight: 600; color: var(--muted); }
       .lede { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; }
       .group { margin: 0 0 16px; }
-      .place { margin: 0 0 8px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+      .place { margin: 0 0 8px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
       .item { padding: 12px 0; border-top: 1px solid var(--border); }
-      .group .item:first-of-type { border-top: 0; padding-top: 0; }
+      .place + .item { border-top: 0; padding-top: 0; }
       .title { font-weight: 650; }
       .body { margin-top: 3px; white-space: pre-wrap; }
       .meta { margin-top: 6px; color: var(--muted); font-size: 12.5px; }
