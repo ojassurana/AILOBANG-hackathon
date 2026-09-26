@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "agents": "^0.24.0",
-    "ai-text-detector": "^1.0.8"
+    "ai-text-detector": "^1.0.8",
+    "teleproto": "^1.229.0"
   }
 }

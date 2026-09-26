@@ -22,6 +22,10 @@
       {
         "name": "VOICE_AGENT",
         "class_name": "VoiceAgent"
+      },
+      {
+        "name": "TELEGRAM_SESSION",
+        "class_name": "TelegramSession"
       }
     ]
   },
@@ -29,6 +33,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["VoiceAgent"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["TelegramSession"]
     }
   ],
   "vars": {

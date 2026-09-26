@@ -10,4 +10,11 @@ export interface Env extends Cloudflare.Env {
   OPENAI_API_KEY: string;
   DEEPSEEK_API_KEY: string;
   EXA_API_KEY: string;
+  /**
+   * The Telegram application the user session logs in as, from my.telegram.org.
+   * Issued against a Telegram account, not generatable, and the app's identity
+   * to Telegram — so it is a secret like any other.
+   */
+  TELEGRAM_API_ID: string;
+  TELEGRAM_API_HASH: string;
 }
