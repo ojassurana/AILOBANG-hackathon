@@ -4,7 +4,7 @@
  * Connections are scoped to a `user_id`, which we set to the WorkOS user id so
  * every customer sees only their own connected accounts.
  */
-import { CONNECTORS, toolkitAuthConfigs } from "./connectors";
+import { CONNECTORS, isComposio, toolkitAuthConfigs } from "./connectors";
 
 const COMPOSIO_API = "https://backend.composio.dev/api/v3.1";
 
@@ -302,7 +302,12 @@ export async function createToolRouterSession(
       method: "POST",
       body: JSON.stringify({
         user_id: userId,
-        toolkits: { enable: [...new Set(CONNECTORS.map((connector) => connector.toolkit))] },
+        // Only the Composio-backed rows: a row that connects another way has no
+        // Composio toolkit, and enabling one this project does not want would
+        // make Composio reject the whole session for every user.
+        toolkits: {
+          enable: [...new Set(CONNECTORS.filter(isComposio).map((connector) => connector.toolkit))],
+        },
         auth_configs: toolkitAuthConfigs(),
         manage_connections: { enable: true, callback_url: callbackUrl },
         experimental: { fast_mode: true },

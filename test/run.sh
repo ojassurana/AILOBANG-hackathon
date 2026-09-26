@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
-# Bundle the test with esbuild (already present via wrangler) and run it on node.
+# Bundle every test file with esbuild (already present via wrangler) and run it
+# on node. Each file gets its own build: esbuild rejects more than one entry
+# point with --outfile. A test reports failure by setting a non-zero exit code
+# rather than by throwing, so each run's status has to be checked explicitly.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BUNDLE="$(mktemp -t ailobang-test-XXXXXX.mjs)"
-trap 'rm -f "$BUNDLE"' EXIT
+# A directory, not a file: `mktemp -t name.mjs` puts the random suffix after the
+# extension and node then refuses to load the result.
+BUNDLE_DIR="$(mktemp -d -t ailobang-test-XXXXXX)"
+trap 'rm -rf "$BUNDLE_DIR"' EXIT
+BUNDLE="${BUNDLE_DIR}/test.mjs"
 
-./node_modules/.bin/esbuild test/humanize.test.ts \
-  --bundle --format=esm --platform=node --target=node20 \
-  --outfile="$BUNDLE" --log-level=warning
+status=0
+for test_file in test/*.test.ts; do
+  echo "== ${test_file}"
+  ./node_modules/.bin/esbuild "$test_file" \
+    --bundle --format=esm --platform=node --target=node20 \
+    --outfile="$BUNDLE" --log-level=warning
 
-node "$BUNDLE"
+  node "$BUNDLE" || status=1
+done
+
+exit "$status"

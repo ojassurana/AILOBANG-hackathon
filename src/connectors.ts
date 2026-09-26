@@ -14,6 +14,9 @@
  * Toolkit slugs are irregular: googledrive/googlesheets/googledocs take no
  * underscore, while google_maps does.
  */
+/** How a row's connection is made. */
+export type ConnectorKind = "composio" | "telegram";
+
 export interface Connector {
   /** Row identity and URL segment. */
   slug: string;
@@ -26,9 +29,28 @@ export interface Connector {
    * disclosure.
    */
   capabilities?: string[];
-  /** Composio toolkit the connected account is stored against. */
+  /**
+   * How this row connects. Absent means "composio", which is why the existing
+   * rows carry no field.
+   */
+  kind?: ConnectorKind;
+  /**
+   * The toolkit the connected account is stored against. A Telegram row connects
+   * some other way but still carries one, because the helpers below use it to
+   * group rows — a row whose toolkit is undefined would collide with every other
+   * such row.
+   */
   toolkit: string;
-  authConfigId: string;
+  /** Composio auth config. Only meaningful when `kind` is "composio". */
+  authConfigId?: string;
+}
+
+/** A row Composio owns the connection for, with its auth config narrowed in. */
+export type ComposioConnector = Connector & { authConfigId: string };
+
+/** Narrows to the rows whose connection Composio creates and stores. */
+export function isComposio(connector: Connector): connector is ComposioConnector {
+  return connector.kind !== "telegram" && typeof connector.authConfigId === "string";
 }
 
 /** Google Super: one consent for Drive, Gmail, Sheets, Docs, Calendar and more. */
@@ -278,10 +300,16 @@ export function connectorsForToolkit(toolkit: string): Connector[] {
   return CONNECTORS.filter((c) => c.toolkit === toolkit);
 }
 
-/** The toolkit each connection lives under, paired with the auth config to use for it. */
+/**
+ * The toolkit each Composio connection lives under, paired with its auth config.
+ * Rows that connect another way are skipped: they have no Composio toolkit and no
+ * auth config, and sending them here would put `undefined` into the payload.
+ */
 export function toolkitAuthConfigs(): Record<string, string> {
   const configs: Record<string, string> = {};
-  for (const connector of CONNECTORS) configs[connector.toolkit] = connector.authConfigId;
+  for (const connector of CONNECTORS) {
+    if (isComposio(connector)) configs[connector.toolkit] = connector.authConfigId;
+  }
   return configs;
 }
 

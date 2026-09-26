@@ -14,10 +14,12 @@ import {
   connectorBySlug,
   connectorsForToolkit,
   googleConnectors,
+  isComposio,
   logoUrl,
   standaloneConnectors,
   type Connector,
 } from "./connectors";
+import { composioRowState, connectedRowCount } from "./connector-state";
 import {
   createConnectLink,
   deleteConnectedAccount,
@@ -369,6 +371,14 @@ async function startConnect(request: Request, env: Env, slug: string): Promise<R
     });
   }
 
+  // Only Composio rows have a hosted sign-in to open. A row that connects
+  // another way is handled by its own route and has no auth config to send.
+  if (!isComposio(connector)) {
+    return errorPage(404, "Unknown connector", "That connector isn't available.", {
+      back: { href: "/app", label: "Back to your accounts" },
+    });
+  }
+
   const callbackUrl = new URL(`/connect/return/${connector.slug}`, request.url).toString();
 
   try {
@@ -470,7 +480,9 @@ function renderConnectionsPage(
     warning: string | null;
   },
 ): string {
-  const connected = CONNECTORS.filter((c) => accounts.get(c.toolkit)?.status === "ACTIVE").length;
+  // Every row's status comes from Composio today, so nothing is added to the
+  // count; the denominator is the shelf itself, which keeps the two in step.
+  const connected = connectedRowCount(CONNECTORS, (toolkit) => accounts.get(toolkit)?.status);
 
   const googleAccount = accounts.get(GOOGLE_GROUP.toolkit);
   const groupServices = googleConnectors();
@@ -841,35 +853,34 @@ function connectorRow(
   account: ConnectedAccount | undefined,
   insideGroup = false,
 ): string {
-  const status = account?.status ?? null;
+  const state = composioRowState(account?.status, account?.label);
 
-  let state: string;
-  if (status === "ACTIVE") {
-    state = `<span class="pill"><span class="dot ok"></span>Connected</span>${
-      account?.label ? `<span class="acct">${escapeHtml(account.label)}</span>` : ""
-    }`;
-  } else if (status === "PENDING") {
-    state = `<span class="pill"><span class="dot wait"></span>Finishing sign-in</span>`;
-  } else if (status === "FAILED") {
-    state = `<span class="pill"><span class="dot bad"></span>Failed</span>`;
-  } else {
-    state = `<span class="muted">Not connected</span>`;
-  }
+  const stateCell = state.tone
+    ? `<span class="pill"><span class="dot ${state.tone}"></span>${escapeHtml(state.label)}</span>${
+        state.accountLabel ? `<span class="acct">${escapeHtml(state.accountLabel)}</span>` : ""
+      }`
+    : `<span class="muted">${escapeHtml(state.label)}</span>`;
 
-  // Rows inside the group carry no actions: the group one connection, so its
+  // Rows inside the group carry no actions: the group is one connection, so its
   // header owns connect, reconnect and disconnect.
   let actionCell = "";
   if (!insideGroup) {
-    const action =
-      status === "ACTIVE"
-        ? `<a class="btn ghost" href="/connect/${connector.slug}">Reconnect</a>
+    const button =
+      state.actionKind === "reconnect"
+        ? `<a class="btn ghost" href="/connect/${connector.slug}">${escapeHtml(state.actionLabel)}</a>`
+        : `<a class="btn" href="/connect/${connector.slug}">${escapeHtml(state.actionLabel)}${
+            state.actionKind === "connect" ? `<span class="sm-hide"> now</span>` : ""
+          }</a>`;
+
+    const disconnect = state.canDisconnect
+      ? `
               <form class="inline" method="post" action="/disconnect/${connector.slug}"
                     onsubmit="return confirm('${disconnectConfirmText(connector)}')">
                 <button class="link" type="submit">Disconnect</button>
               </form>`
-        : `<a class="btn" href="/connect/${connector.slug}">Connect<span class="sm-hide"> now</span></a>`;
+      : "";
 
-    actionCell = `<td class="act">${action}</td>`;
+    actionCell = `<td class="act">${button}${disconnect}</td>`;
   }
 
   return `          <tr>
@@ -883,7 +894,7 @@ function connectorRow(
                 </span>
               </span>
             </td>
-            <td>${state}</td>
+            <td>${stateCell}</td>
             ${actionCell}
           </tr>`;
 }
