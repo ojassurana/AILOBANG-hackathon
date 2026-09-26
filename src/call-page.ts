@@ -156,7 +156,7 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
           <h1>Talk to your accounts</h1>
           <p class="sub">Start a call, then just ask. Everything runs on the accounts you connected.</p>
         </div>
-        <div class="who">${escapeHtml(email)}<br /><a href="/code">Coding chat</a> · <a href="/app">Your accounts</a></div>
+        <div class="who">${escapeHtml(email)}<br /><a href="/app">Your accounts</a></div>
       </div>
 
       <div class="stage">

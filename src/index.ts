@@ -35,7 +35,6 @@ import {
   type ConnectedAccount,
 } from "./composio";
 import { renderCallPage } from "./call-page";
-import { renderCodingPage } from "./coding-page";
 import { renderTelegramPage } from "./telegram-page";
 import type { TelegramStatus } from "./telegram";
 import type { Env } from "./env";
@@ -53,8 +52,7 @@ const WORKOS_API = "https://api.workos.com";
  * that binding is renamed, this has to move with it or calls stop routing.
  */
 const VOICE_AGENT_ROUTE = "voice-agent";
-const CODING_AGENT_ROUTE = "coding-agent";
-const PUBLIC_AGENT_ROUTES = new Set([VOICE_AGENT_ROUTE, CODING_AGENT_ROUTE]);
+const PUBLIC_AGENT_ROUTES = new Set([VOICE_AGENT_ROUTE]);
 const SESSION_COOKIE = "alb_session";
 const PKCE_COOKIE = "alb_pkce";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
@@ -103,8 +101,8 @@ async function route(request: Request, env: Env): Promise<Response> {
   // session cookie decides who may reach which agent.
   if (path.startsWith("/agents/")) {
     // routeAgentRequest exposes every Durable Object binding, not just the
-    // agents: adding one silently adds a route named after it. Only voice and
-    // coding chat have a public surface; Telegram's DO stays 404 here.
+    // agents: adding one silently adds a route named after it. Only the voice
+    // agent has a public surface; Telegram's DO stays 404 here.
     const [, , namespace] = path.split("/");
     if (!PUBLIC_AGENT_ROUTES.has(namespace)) return new Response("Not found", { status: 404 });
 
@@ -157,8 +155,6 @@ async function route(request: Request, env: Env): Promise<Response> {
       return telegramScreen(request, env);
     case "/call":
       return callPage(request, env);
-    case "/code":
-      return codingPage(request, env);
     case "/auth/logout":
       return logout(request, env);
     case "/favicon.svg":
@@ -338,16 +334,6 @@ async function callPage(request: Request, env: Env): Promise<Response> {
   if (!session) return redirect("/signin", request);
 
   return new Response(renderCallPage({ email: session.email, userId: session.sub }), {
-    headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
-  });
-}
-
-/** Text coding chat: AIChatAgent, not the voice call. */
-async function codingPage(request: Request, env: Env): Promise<Response> {
-  const session = await currentSession(request, env);
-  if (!session) return redirect("/signin", request);
-
-  return new Response(renderCodingPage({ email: session.email, userId: session.sub }), {
     headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
   });
 }
