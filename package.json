@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "test": "bash test/run.sh",
     "deploy": "wrangler deploy",
     "types": "wrangler types",
     "migrate:local": "wrangler d1 migrations apply ailobang-users --local",
@@ -12,6 +13,8 @@
     "tail": "wrangler tail"
   },
   "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^5.6.3",
     "wrangler": "^4.135.0"
   },
   "dependencies": {

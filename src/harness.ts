@@ -14,13 +14,17 @@
 
 import { chatWithTools, type ChatMessage, type ToolSchema } from "./deepseek";
 import { webSearch } from "./exa";
+import { detectAi, isScoreable } from "./detector";
+import { humanizePass, strategyFor } from "./humanize";
 import type { McpClient, McpTool } from "./mcp";
 
 /** Enough for search → schema → execute plus a summary; a cap keeps calls snappy. */
-const MAX_STEPS = 6;
+const MAX_STEPS = 9;
 /** Tool output beyond this is noise for a spoken answer and slows the loop down. */
 const MAX_TOOL_CHARS = 6000;
 const MAX_ANSWER_CHARS = 1500;
+/** A returned document has to survive intact for the write-back step. */
+const MAX_DOCUMENT_CHARS = 60000;
 
 const SYSTEM_PROMPT = `## Voice conversation context
 You are the backend for an assistant in a live voice call. You do not speak:
@@ -49,6 +53,20 @@ question. If a search returns nothing useful, say so rather than guessing.
 3. COMPOSIO_MULTI_EXECUTE_TOOL to run them, once, with every tool it needs.
 Never invent a tool slug or an argument value you were not given. If the caller
 has not connected the account a request needs, say so plainly.
+
+## Writing a document, then humanizing it
+When the caller asks for an essay, report or any written document, do it in this
+order and say what you are doing at each stage:
+1. Write the document first with a Google Docs tool, so the caller can open it
+   while the rest happens.
+2. Then call humanize_and_check with the text you just wrote. It rewrites the
+   text, runs an AI detector, and escalates until the detector reports the text
+   as human. It returns the final text and what each pass scored.
+3. Then write the final text back into the same document, replacing the old body:
+   delete the existing content range, then insert the returned text.
+Never tell the caller the text was humanized unless humanize_and_check says a
+detector confirmed it. If it reports that no detector could score the text, say
+that plainly instead.
 
 ## Return the result
 Answer in at most 60 words of plain conversational text, with no markdown, no
@@ -90,6 +108,33 @@ const WEB_SEARCH_TOOL: ToolSchema = {
   },
 };
 
+/**
+ * Built in rather than exposed as a connector, for the same reason as web_search:
+ * the harness owns the loop, and the voice agent should hear each stage.
+ */
+const HUMANIZE_TOOL: ToolSchema = {
+  type: "function",
+  function: {
+    name: "humanize_and_check",
+    description:
+      "Rewrite text so it stops reading as AI-generated, then verify it with an AI detector, " +
+      "escalating to a stronger rewrite until the detector reports it as human. Use this after " +
+      "writing a document and before telling the caller it is finished. Returns the final text " +
+      "plus what each pass scored.",
+    parameters: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "The text to humanize. At least 255 characters." },
+        maxAttempts: {
+          type: "integer",
+          description: "How many rewrite attempts to allow. Defaults to 3, maximum 4.",
+        },
+      },
+      required: ["text"],
+    },
+  },
+};
+
 export interface HarnessResult {
   text: string;
   steps: string[];
@@ -114,7 +159,7 @@ export class ConnectorHarness {
 
   async run(transcript: string, onProgress: (note: string) => void): Promise<HarnessResult> {
     await this.warmUp();
-    const schemas = [...(this.mcpSchemas ?? []), WEB_SEARCH_TOOL];
+    const schemas = [...(this.mcpSchemas ?? []), WEB_SEARCH_TOOL, HUMANIZE_TOOL];
 
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
@@ -149,15 +194,21 @@ export class ConnectorHarness {
 
         let output: string;
         try {
-          output =
-            call.name === WEB_SEARCH_TOOL.function.name
-              ? await this.search(call.arguments)
-              : await this.mcpCall(call.name, call.arguments);
+          if (call.name === WEB_SEARCH_TOOL.function.name) {
+            output = await this.search(call.arguments);
+          } else if (call.name === HUMANIZE_TOOL.function.name) {
+            output = await this.humanizeAndCheck(call.arguments, onProgress);
+          } else {
+            output = await this.mcpCall(call.name, call.arguments);
+          }
         } catch (error) {
           output = `The tool call failed: ${errorMessage(error)}`;
         }
 
-        messages.push({ role: "tool", tool_call_id: call.id, content: truncate(output, MAX_TOOL_CHARS) });
+        // The humanize result carries the rewritten document, which the next step has
+        // to write back verbatim, so it must not be cut down like a search result.
+        const limit = call.name === HUMANIZE_TOOL.function.name ? MAX_DOCUMENT_CHARS : MAX_TOOL_CHARS;
+        messages.push({ role: "tool", tool_call_id: call.id, content: truncate(output, limit) });
       }
     }
 
@@ -165,6 +216,87 @@ export class ConnectorHarness {
       text: truncate(answer ?? "I could not find that. Please try asking again.", MAX_ANSWER_CHARS),
       steps,
     };
+  }
+
+  /**
+   * The humanize-then-verify loop.
+   *
+   * Each attempt rewrites harder than the last, and the detector decides whether
+   * to stop. The loop only reports success on a real zero from a real detector:
+   * if no detector could score the text, that is reported as unverified rather
+   * than quietly counted as clean.
+   */
+  private async humanizeAndCheck(
+    rawArguments: string,
+    onProgress: (note: string) => void,
+  ): Promise<string> {
+    const args = parseArguments(rawArguments) as { text?: string; maxAttempts?: number };
+    const original = (args.text ?? "").trim();
+
+    if (!original) return "humanize_and_check needs the text to work on.";
+    if (!isScoreable(original)) {
+      return (
+        "That text is under 255 characters, which is too short for an AI detector to score, " +
+        "so it was left unchanged."
+      );
+    }
+
+    const maxAttempts = Math.min(Math.max(args.maxAttempts ?? 3, 1), 4);
+    const detect = (text: string) =>
+      detectAi((name, toolArgs) => this.mcpCall(name, JSON.stringify(toolArgs)), text);
+
+    const history: string[] = [];
+    let current = original;
+    let finalScore: number | null = null;
+    let verified = false;
+
+    for (let pass = 1; pass <= maxAttempts; pass++) {
+      const { strategy } = strategyFor(pass);
+      onProgress(
+        pass === 1 ? "Humanizing it now." : "It still reads as AI-written, so I am rewriting it harder.",
+      );
+
+      current = await humanizePass(this.deepseekKey, current, pass, this.userId);
+
+      onProgress("Running it past the AI detector.");
+
+      let detected;
+      try {
+        detected = await detect(current);
+      } catch (error) {
+        history.push(`pass ${pass} (${strategy}): detector failed, ${errorMessage(error)}`);
+        break;
+      }
+
+      if (detected.aiScore === null) {
+        history.push(`pass ${pass} (${strategy}): unverified, ${detected.unavailable}`);
+        break;
+      }
+
+      history.push(`pass ${pass} (${strategy}): ${detected.aiScore}% AI (${detected.source})`);
+      finalScore = detected.aiScore;
+
+      if (detected.aiScore === 0) {
+        verified = true;
+        onProgress("It reads as human-written now. Finished.");
+        break;
+      }
+    }
+
+    const summary = verified
+      ? `Verified human-written by a detector after ${history.length} pass(es).`
+      : finalScore === null
+        ? "No detector could score this text, so it is unverified."
+        : `Still scoring ${finalScore}% AI after ${history.length} pass(es).`;
+
+    return [
+      summary,
+      `Passes: ${history.join("; ")}`,
+      "The final text is between the markers. Nothing outside them is part of it.",
+      "<<<FINAL_TEXT",
+      current,
+      "FINAL_TEXT>>>",
+    ].join("\n");
   }
 
   private async mcpCall(name: string, rawArguments: string): Promise<string> {
