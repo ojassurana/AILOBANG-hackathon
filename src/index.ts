@@ -1,11 +1,23 @@
 /**
- * Ailobang — Cloudflare Worker serving a landing page, a sign-in page, and a
- * post-login page, with WorkOS AuthKit as the identity provider and D1 as the
- * user store.
+ * Ailobang — Cloudflare Worker serving a landing page, a sign-in page, and the
+ * post-login "Connect your accounts" page, with WorkOS AuthKit as the identity
+ * provider, Composio for third-party connections, and D1 as the user store.
  *
  * The AuthKit Authorization Code flow is implemented against the WorkOS REST API
  * with PKCE, so the Worker holds no client secret (only the public client id).
  */
+
+import {
+  CONNECTORS,
+  connectorBySlug,
+  logoUrl,
+  type Connector,
+} from "./connectors";
+import {
+  createConnectLink,
+  listConnectedAccounts,
+  type ConnectedAccount,
+} from "./composio";
 
 const WORKOS_API = "https://api.workos.com";
 const SESSION_COOKIE = "alb_session";
@@ -19,6 +31,7 @@ interface Env {
   WORKOS_CLIENT_ID: string;
   WORKOS_REDIRECT_URI: string;
   SESSION_SECRET: string;
+  COMPOSIO_API_KEY: string;
 }
 
 interface WorkOSUser {
@@ -65,6 +78,15 @@ async function route(request: Request, env: Env): Promise<Response> {
       status: 405,
       headers: { Allow: "GET, HEAD" },
     });
+  }
+
+  // Composio sends the browser back here after a connection attempt, so this
+  // has to be matched before the /connect/<toolkit> route below.
+  if (path === "/connect/return" || path.startsWith("/connect/return/")) {
+    return finishConnect(request, env, path);
+  }
+  if (path.startsWith("/connect/")) {
+    return startConnect(request, env, path.slice("/connect/".length));
   }
 
   switch (path) {
@@ -131,7 +153,7 @@ async function finishLogin(request: Request, env: Env): Promise<Response> {
 
   const denied = url.searchParams.get("error_description") ?? url.searchParams.get("error");
   if (denied) {
-    return errorPage(400, "Sign-in failed", denied, { "Set-Cookie": clearPkce });
+    return errorPage(400, "Sign-in failed", denied, { headers: { "Set-Cookie": clearPkce } });
   }
 
   const code = url.searchParams.get("code");
@@ -142,7 +164,7 @@ async function finishLogin(request: Request, env: Env): Promise<Response> {
       400,
       "Sign-in failed",
       "This sign-in attempt expired or could not be verified. Please start again.",
-      { "Set-Cookie": clearPkce },
+      { headers: { "Set-Cookie": clearPkce } },
     );
   }
 
@@ -168,7 +190,7 @@ async function finishLogin(request: Request, env: Env): Promise<Response> {
       rejected
         ? "This sign-in attempt expired or was already used. Please try again."
         : "We could not complete the sign-in. Please try again in a moment.",
-      { "Set-Cookie": clearPkce },
+      { headers: { "Set-Cookie": clearPkce } },
     );
   }
 
@@ -218,41 +240,244 @@ async function appPage(request: Request, env: Env): Promise<Response> {
   const session = await currentSession(request, env);
   if (!session) return redirect("/signin", request);
 
-  const html = `<!doctype html>
+  const url = new URL(request.url);
+  const justConnected = url.searchParams.get("connected");
+  const denied = url.searchParams.get("error");
+
+  let accounts = new Map<string, ConnectedAccount>();
+  let warning: string | null = null;
+  try {
+    accounts = await listConnectedAccounts(env.COMPOSIO_API_KEY, session.sub);
+  } catch (error) {
+    console.error("composio listConnectedAccounts failed", error);
+    warning = "We couldn't reach the connector service. Refresh to try again.";
+  }
+
+  const html = renderConnectionsPage(session, accounts, { justConnected, denied, warning });
+  return new Response(html, {
+    headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/** Sends the user into Composio's hosted Connect Link for one toolkit. */
+async function startConnect(request: Request, env: Env, slug: string): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  const connector = connectorBySlug(slug);
+  if (!connector) {
+    return errorPage(404, "Unknown connector", "That connector isn't available.", {
+      back: { href: "/app", label: "Back to your accounts" },
+    });
+  }
+
+  const callbackUrl = new URL(`/connect/return/${connector.slug}`, request.url).toString();
+
+  try {
+    const link = await createConnectLink(
+      env.COMPOSIO_API_KEY,
+      session.sub,
+      connector.authConfigId,
+      callbackUrl,
+    );
+    return new Response(null, {
+      status: 302,
+      headers: { Location: link, "Cache-Control": "no-store" },
+    });
+  } catch (error) {
+    console.error("composio createConnectLink failed", error);
+    return errorPage(
+      502,
+      "Couldn't start that connection",
+      `We couldn't open the ${connector.name} sign-in. Please try again.`,
+      { back: { href: "/app", label: "Back to your accounts" } },
+    );
+  }
+}
+
+/** Composio redirects here after the user finishes (or abandons) a connection. */
+async function finishConnect(request: Request, env: Env, path: string): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  const url = new URL(request.url);
+  const slug = path.replace("/connect/return", "").replace(/^\//, "");
+  const target = new URL("/app", url);
+
+  if (slug) target.searchParams.set("connected", slug);
+  const denied = url.searchParams.get("error_description") ?? url.searchParams.get("error");
+  if (denied) target.searchParams.set("error", denied);
+
+  return new Response(null, {
+    status: 302,
+    headers: { Location: target.toString(), "Cache-Control": "no-store" },
+  });
+}
+
+function renderConnectionsPage(
+  session: Session,
+  accounts: Map<string, ConnectedAccount>,
+  flash: { justConnected: string | null; denied: string | null; warning: string | null },
+): string {
+  const connected = CONNECTORS.filter((c) => accounts.get(c.slug)?.status === "ACTIVE").length;
+
+  let banner = "";
+  if (flash.denied) {
+    banner = `<p class="note bad">That connection didn't finish (${escapeHtml(flash.denied)}). You can try again below.</p>`;
+  } else if (flash.justConnected) {
+    const name = connectorBySlug(flash.justConnected)?.name ?? "Account";
+    banner = `<p class="note ok">${escapeHtml(name)} connected.</p>`;
+  } else if (flash.warning) {
+    banner = `<p class="note bad">${escapeHtml(flash.warning)}</p>`;
+  }
+
+  const rows = CONNECTORS.map((connector) =>
+    connectorRow(connector, accounts.get(connector.slug)),
+  ).join("\n");
+
+  return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hello World</title>
+    <title>Connect your accounts · Ailobang</title>
     <link rel="icon" href="/favicon.svg" />
     <style>
-      :root { color-scheme: light dark; }
+      :root {
+        color-scheme: light dark;
+        --bg: #fbfbfd;
+        --fg: #16161a;
+        --muted: #6b6b76;
+        --card: #ffffff;
+        --accent: #16161a;
+        --accent-fg: #ffffff;
+        --border: rgba(0, 0, 0, 0.10);
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 10px 30px rgba(0, 0, 0, 0.05);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0d0d10;
+          --fg: #f4f4f6;
+          --muted: #9a9aa5;
+          --card: #141418;
+          --accent: #f4f4f6;
+          --accent-fg: #16161a;
+          --border: rgba(255, 255, 255, 0.12);
+          --shadow: none;
+        }
+      }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
-        min-height: 100dvh;
-        display: grid;
-        place-items: center;
-        background: Canvas;
-        color: CanvasText;
-        font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       }
-      main { text-align: center; padding: 24px; }
-      h1 { margin: 0 0 12px; font-size: 44px; letter-spacing: -0.03em; }
-      p { margin: 0; opacity: 0.6; font-size: 14px; }
-      a { color: inherit; }
+      .shell { max-width: 860px; margin: 0 auto; padding: 48px 20px 72px; }
+      .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+      h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: -0.02em; }
+      .sub { margin: 0; color: var(--muted); font-size: 14px; }
+      .who { color: var(--muted); font-size: 13px; text-align: right; white-space: nowrap; }
+      .who a { color: inherit; }
+      .note { margin: 24px 0 0; padding: 12px 14px; border-radius: 12px; font-size: 14px; }
+      .note.ok { background: rgba(26, 155, 82, 0.10); border: 1px solid rgba(26, 155, 82, 0.26); }
+      .note.bad { background: rgba(192, 57, 43, 0.10); border: 1px solid rgba(192, 57, 43, 0.26); }
+      .card {
+        margin-top: 28px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        overflow: hidden;
+        box-shadow: var(--shadow);
+      }
+      table { width: 100%; border-collapse: collapse; }
+      td { padding: 14px 18px; border-top: 1px solid var(--border); vertical-align: middle; }
+      tr:first-child td { border-top: 0; }
+      .app { display: flex; align-items: center; gap: 12px; }
+      .app img { border-radius: 8px; flex: none; }
+      .nm { display: block; font-weight: 550; }
+      .bl { display: block; color: var(--muted); font-size: 12.5px; }
+      .pill { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 550; }
+      .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+      .dot.ok { background: #1a9b52; }
+      .dot.wait { background: #c9861a; }
+      .dot.bad { background: #c0392b; }
+      .acct { display: block; margin-top: 2px; color: var(--muted); font-size: 12.5px; }
+      .muted { color: var(--muted); font-size: 13.5px; }
+      .act { text-align: right; width: 1%; white-space: nowrap; }
+      .btn {
+        display: inline-block;
+        padding: 8px 14px;
+        border-radius: 9px;
+        background: var(--accent);
+        color: var(--accent-fg);
+        font-size: 13.5px;
+        font-weight: 550;
+        text-decoration: none;
+      }
+      .btn:hover { opacity: 0.88; }
+      .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+      @media (max-width: 560px) {
+        .bl, .who { display: none; }
+        .shell { padding: 32px 14px 56px; }
+        td { padding: 12px 14px; }
+      }
     </style>
   </head>
   <body>
-    <main>
-      <h1>Hello World</h1>
-      <p>${escapeHtml(session.email)} &middot; <a href="/auth/logout">Log out</a></p>
-    </main>
+    <div class="shell">
+      <div class="top">
+        <div>
+          <h1>Connect your accounts</h1>
+          <p class="sub">${connected} of ${CONNECTORS.length} connected. You can change these any time.</p>
+        </div>
+        <div class="who">${escapeHtml(session.email)}<br /><a href="/auth/logout">Log out</a></div>
+      </div>
+${banner}
+      <div class="card">
+        <table>
+${rows}
+        </table>
+      </div>
+    </div>
   </body>
 </html>`;
+}
 
-  return new Response(html, {
-    headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
-  });
+function connectorRow(connector: Connector, account: ConnectedAccount | undefined): string {
+  const status = account?.status ?? null;
+
+  let state: string;
+  if (status === "ACTIVE") {
+    state = `<span class="pill"><span class="dot ok"></span>Connected</span>${
+      account?.label ? `<span class="acct">${escapeHtml(account.label)}</span>` : ""
+    }`;
+  } else if (status === "PENDING") {
+    state = `<span class="pill"><span class="dot wait"></span>Finishing sign-in</span>`;
+  } else if (status === "FAILED") {
+    state = `<span class="pill"><span class="dot bad"></span>Failed</span>`;
+  } else {
+    state = `<span class="muted">Not connected</span>`;
+  }
+
+  const action =
+    status === "ACTIVE"
+      ? `<a class="btn ghost" href="/connect/${connector.slug}">Reconnect</a>`
+      : `<a class="btn" href="/connect/${connector.slug}">Connect now</a>`;
+
+  return `          <tr>
+            <td>
+              <span class="app">
+                <img src="${logoUrl(connector.slug)}" alt="" width="28" height="28" loading="lazy" />
+                <span>
+                  <span class="nm">${escapeHtml(connector.name)}</span>
+                  <span class="bl">${escapeHtml(connector.blurb)}</span>
+                </span>
+              </span>
+            </td>
+            <td>${state}</td>
+            <td class="act">${action}</td>
+          </tr>`;
 }
 
 async function upsertUser(db: D1Database, user: WorkOSUser, organizationId: string | null): Promise<void> {
@@ -397,8 +622,9 @@ function errorPage(
   status: number,
   title: string,
   detail: string,
-  extraHeaders: Record<string, string> = {},
+  options: { headers?: Record<string, string>; back?: { href: string; label: string } } = {},
 ): Response {
+  const { headers: extraHeaders = {}, back = { href: "/signin", label: "Back to log in" } } = options;
   const html = `<!doctype html>
 <html lang="en">
   <head>
@@ -426,7 +652,7 @@ function errorPage(
     <main>
       <h1>${escapeHtml(title)}</h1>
       <p>${escapeHtml(detail)}</p>
-      <a href="/signin">Back to log in</a>
+      <a href="${back.href}">${escapeHtml(back.label)}</a>
     </main>
   </body>
 </html>`;

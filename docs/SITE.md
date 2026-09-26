@@ -13,7 +13,9 @@ Live at **https://ailobang.com**
 | `GET /signin` | Log-in page (redirects to `/app` if already signed in) |
 | `GET /auth/login` | Starts the AuthKit flow: sets a PKCE cookie and redirects to WorkOS |
 | `GET /callback` | Exchanges the WorkOS code, upserts the user in D1, sets the session cookie |
-| `GET /app` | The post-login page ("Hello World"); redirects to `/signin` when signed out |
+| `GET /app` | The post-login **Connect your accounts** page; redirects to `/signin` when signed out |
+| `GET /connect/<toolkit>` | Creates a Composio Connect Link for that toolkit and redirects to it |
+| `GET /connect/return/<toolkit>` | Composio's callback; returns the browser to `/app?connected=<toolkit>` |
 | `GET /auth/logout` | Ends the WorkOS session and clears the local cookie |
 
 ## How authentication works
@@ -47,8 +49,11 @@ to `/signin`.
 Secrets (set with `npx wrangler secret put <NAME>`):
 
 - `SESSION_SECRET` — 32-byte random string used to sign session cookies
+- `COMPOSIO_API_KEY` — project API key from the Composio dashboard, used for Connect Links and
+  reading connected accounts
 
-For local development, create `.dev.vars` with `SESSION_SECRET=<value>`.
+For local development, create `.dev.vars` with `SESSION_SECRET=<value>` and
+`COMPOSIO_API_KEY=<value>`.
 
 ## WorkOS environment
 
@@ -82,6 +87,45 @@ npx wrangler d1 execute ailobang-users --remote --command "SELECT * FROM users"
 `npm run types` after a fresh clone (or whenever `wrangler.jsonc` changes) to satisfy
 typechecking and editor support.
 
+## Connectors (Composio)
+
+`/app` is the **Connect your accounts** page: a table of the 11 connectors in
+`src/connectors.ts`, each row showing its connection state and a **Connect now** button.
+
+Connections are scoped by Composio `user_id`, which is set to the **WorkOS user id**
+(`session.sub`) — a stable database id, never the email, per Composio's guidance. One
+customer's connections are never visible to another.
+
+The flow:
+
+1. `GET /connect/<toolkit>` calls Composio `POST /api/v3.1/connected_accounts/link` with the
+   toolkit's `auth_config_id`, the user's id, and a `callback_url` of `/connect/return/<toolkit>`.
+2. Composio returns a `redirect_url` (its hosted Connect Link) and the Worker redirects there.
+   Credentials never pass through the Worker or D1.
+3. After the user consents, Composio sends the browser to `/connect/return/<toolkit>`, which
+   redirects to `/app?connected=<toolkit>` and shows a confirmation.
+4. `/app` reads state from `GET /api/v3.1/connected_accounts?user_ids=<user id>`.
+
+**Auth configs.** Composio requires an `auth_config_id` per toolkit. All 11 are
+Composio-managed OAuth2 configs (`is_composio_managed: true`), so the project needs no OAuth
+apps of its own. They were created with the Composio CLI, one per toolkit:
+
+```bash
+composio dev auth-configs create --toolkit gmail
+```
+
+The ids live in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
+`googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
+
+**Constraints worth knowing**
+
+- Instagram's toolkit supports **Business or Creator** accounts only, not personal accounts.
+- The account label shown in the table is derived from the connected account's own fields, since
+  OAuth2 token responses carry no profile data. Composio's `whoami` identity resolution is
+  CLI-only today.
+- If `COMPOSIO_API_KEY` is missing or rejected, `/app` still renders the table with a warning
+  banner instead of failing outright.
+
 ## Database
 
 `migrations/0001_users.sql` creates `users`: one row per WorkOS user, keyed by the WorkOS user
@@ -93,6 +137,5 @@ instead of inserting duplicates.
 
 - The AuthKit hosted page (WorkOS-hosted) can be branded with Ailobang's logo, colours, and
   copy in the WorkOS dashboard's branding settings.
-- A temporary test account exists in the sandbox environment for verification:
-  `demo@ailobang.com`. Delete it from the WorkOS dashboard and remove the matching `users` row
-  when it is no longer needed.
+- Every test user was deleted on 2026-09-19, so the WorkOS sandbox environment and the D1
+  `users` table are both empty. Sign-ups start from scratch.
