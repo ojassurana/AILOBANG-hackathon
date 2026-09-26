@@ -5,8 +5,9 @@
  * back typed answers with probabilities: a `choice` picks one option and says
  * how concentrated the distribution was, a `noul` gives the probability that a
  * statement is true. That is what routes memory: whether a conversation
- * changes anything, which branch, which folder to walk into, whether two
- * memories are the same thing. Code owns every step after the answer.
+ * changes anything, which branch to read or write, whether two memories are
+ * the same thing. Skill search itself is Vector Search. Code owns every step
+ * after the answer.
  */
 
 const DECISIONS_API = "https://openrouter.ai/api/alpha/decisions";

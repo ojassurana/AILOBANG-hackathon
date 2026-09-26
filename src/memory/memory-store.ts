@@ -6,7 +6,7 @@
  * Worker costs a few hundred milliseconds; a warm query tens), and being one
  * object per user makes it the single writer of that user's tree, so the
  * voice agent and the coding chat cannot write over each other. Everything
- * the agents need — read, walk, write, brief — is a method here, called over
+ * the agents need — read, search, write, brief — is a method here, called over
  * RPC. Jev and the writer model run here too, so the agents hand over a
  * conversation and get back a decision.
  */

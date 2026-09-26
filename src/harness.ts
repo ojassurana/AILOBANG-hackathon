@@ -255,9 +255,9 @@ export class ConnectorHarness {
       ...(this.memory ? [MEMORY_TOOL] : []),
     ];
 
-    // Jev walks the memory tree for the latest request before the model
-    // starts, so a name, a preference or a saved procedure is already in
-    // front of it rather than a lookup it has to think to make.
+    // Jev routes the branch, Vector Search finds the nearest skills, and
+    // those are already in front of the model rather than a lookup it has
+    // to think to make.
     const remembered = this.memory ? await this.memory.recall(latestRequest(transcript), transcript) : "";
     if (remembered) onProgress("Checking what I remember.");
 

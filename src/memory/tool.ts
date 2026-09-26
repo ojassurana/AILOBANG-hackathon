@@ -3,7 +3,8 @@
  * even starts.
  *
  * Most reads never go through the tool: `MemoryToolbox.recall` runs first,
- * with Jev walking the tree, and what it finds is put in front of the model.
+ * Jev routes the branch and Vector Search finds the skills, and what it
+ * finds is put in front of the model.
  * The tool is for the rest — the model wanting to look something up by hand,
  * the caller saying "remember that", "forget that", or asking what is known.
  */

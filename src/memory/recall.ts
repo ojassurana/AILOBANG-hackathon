@@ -1,27 +1,18 @@
 /**
- * Reading memory: Jev walks the tree.
+ * Reading memory: Jev routes, Vector Search finds the skills.
  *
- * First one choice — does the caller's latest request need personal memory,
- * workflow memory, both, or neither. Then, per branch, a walk from the root:
- * Jev is shown the children of the folder it is in and says, for each, whether
- * it would help with the request. Folders it picks are walked into, skills it
- * picks are the result. When the walk finds nothing, Vector Search offers the
- * closest nodes by meaning and Jev vets those the same way.
- *
- * Every question is answered in one Jev request per level, so a read costs a
- * handful of fast calls, not a model reasoning over the whole tree.
+ * One Jev choice — does the latest request need personal memory, workflow
+ * memory, both, or neither. Then, per branch, Atlas Vector Search returns the
+ * closest skills by meaning. No walk, no second Jev pass over the hits.
  */
 
-import { choiceOf, noulOf, type JevClient, type JevQuestion } from "./jev";
+import { choiceOf, type JevClient } from "./jev";
 import type { MemoryNode, MemoryRepo } from "./repo";
 import { BRANCHES, type Branch } from "./paths";
 
-/** Jev must be at least this sure that a node helps before it is followed or returned. */
-export const RELEVANT_AT = 0.5;
 /** A confident "none" from the router ends the read; below this, both branches are tried. */
 export const ROUTE_CONFIDENCE = 0.5;
-const MAX_LEVELS = 5;
-const MAX_FOLLOW_PER_LEVEL = 3;
+/** Skills handed to the harness per branch, nearest first. */
 const MAX_SKILLS = 6;
 const CONVERSATION_CHARS = 2500;
 
@@ -32,12 +23,12 @@ export interface RecallResult {
   confidence: number;
   personal: MemoryNode[];
   workflow: MemoryNode[];
-  /** The paths Jev walked, for the log and the page. */
+  /** What was searched, for the log and the page. */
   trail: string[];
 }
 
 export interface RecallDeps {
-  repo: Pick<MemoryRepo, "children" | "search" | "touch" | "log">;
+  repo: Pick<MemoryRepo, "search" | "touch" | "log">;
   jev: JevClient;
   userId: string;
 }
@@ -81,7 +72,7 @@ export async function recall(deps: RecallDeps, request: string, conversation: st
 
   const found: Record<Branch, MemoryNode[]> = { personal: [], workflow: [] };
   for (const branch of branches) {
-    found[branch] = await walk(deps, branch, ask, context, trail);
+    found[branch] = await nearestSkills(deps, branch, ask, trail);
   }
 
   const used = [...found.personal, ...found.workflow].map((node) => node.path);
@@ -99,77 +90,18 @@ export async function recall(deps: RecallDeps, request: string, conversation: st
   return { route: choice, confidence, personal: found.personal, workflow: found.workflow, trail };
 }
 
-/** Walks one branch from its root, Jev choosing at every level. */
-async function walk(deps: RecallDeps, branch: Branch, request: string, conversation: string, trail: string[]): Promise<MemoryNode[]> {
-  const skills: MemoryNode[] = [];
-  let frontier: string[] = [branch];
-
-  for (let level = 0; level < MAX_LEVELS && frontier.length && skills.length < MAX_SKILLS; level++) {
-    const candidates: MemoryNode[] = [];
-    for (const folder of frontier) candidates.push(...(await deps.repo.children(deps.userId, folder)));
-    if (!candidates.length) break;
-
-    const picked = await vet(deps.jev, candidates, request, conversation);
-    trail.push(`${branch} L${level}: ${picked.map((node) => node.path).join(", ") || "(none)"}`);
-
-    frontier = [];
-    for (const node of picked) {
-      if (node.kind === "skill") skills.push(node);
-      else if (frontier.length < MAX_FOLLOW_PER_LEVEL) frontier.push(node.path);
-    }
-  }
-
-  if (skills.length) return skills.slice(0, MAX_SKILLS);
-
-  // The walk found nothing: try meaning. A skill filed somewhere Jev did not
-  // expect is still found this way.
-  let hits: MemoryNode[] = [];
+/** Closest skills in one branch by meaning. Ranked by Atlas, taken as-is. */
+async function nearestSkills(deps: RecallDeps, branch: Branch, request: string, trail: string[]): Promise<MemoryNode[]> {
+  let hits: { node: MemoryNode; score: number }[] = [];
   try {
-    hits = (await deps.repo.search(deps.userId, request, { branch, kind: "skill", limit: 4 })).map((hit) => hit.node);
+    hits = await deps.repo.search(deps.userId, request, { branch, kind: "skill", limit: MAX_SKILLS });
   } catch (error) {
     trail.push(`${branch} search failed: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
   }
-  if (!hits.length) return [];
-  const vetted = await vet(deps.jev, hits, request, conversation);
-  trail.push(`${branch} search: ${vetted.map((node) => node.path).join(", ") || "(none)"}`);
-  return vetted.filter((node) => node.kind === "skill").slice(0, MAX_SKILLS);
-}
-
-/** One Jev request: a noul per candidate, kept when the probability clears the bar. */
-async function vet(jev: JevClient, candidates: MemoryNode[], request: string, conversation: string): Promise<MemoryNode[]> {
-  const shown = candidates.slice(0, 40);
-  const questions: Record<string, JevQuestion> = {};
-  shown.forEach((node, index) => {
-    questions[`c${index}`] = {
-      type: "noul",
-      instructions:
-        `Would the stored memory \`candidates[${index}]\` help answer or carry out \`latest_request\`? ` +
-        "A folder helps when something inside it is likely needed; a skill helps when its content is needed.",
-      criteria: {
-        true: "The memory is about the person, place, preference, or kind of job the request involves.",
-        false: "The memory is about something the request does not touch.",
-      },
-    };
-  });
-
-  const result = await jev(
-    {
-      latest_request: request,
-      conversation,
-      candidates: shown.map((node) => ({
-        kind: node.kind,
-        title: node.title,
-        summary: node.summary,
-        path: node.path,
-        ...(node.kind === "skill" ? { preview: node.content.slice(0, 200) } : {}),
-      })),
-    },
-    questions,
+  const skills = hits.filter((hit) => hit.node.kind === "skill").slice(0, MAX_SKILLS);
+  trail.push(
+    `${branch} search: ${skills.map((hit) => `${hit.node.path}@${hit.score.toFixed(2)}`).join(", ") || "(none)"}`,
   );
-
-  return shown
-    .map((node, index) => ({ node, p: noulOf(result.answers, `c${index}`) ?? 0 }))
-    .filter((entry) => entry.p >= RELEVANT_AT)
-    .sort((a, b) => b.p - a.p)
-    .map((entry) => entry.node);
+  return skills.map((hit) => hit.node);
 }

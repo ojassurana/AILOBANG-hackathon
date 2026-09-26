@@ -209,11 +209,18 @@ const TREE = [
 function fakeRepo(nodes: MemoryNode[]) {
   const touched: string[] = [];
   const logged: unknown[] = [];
+  const searches: { query: string; branch?: string; kind?: string; limit?: number }[] = [];
   return {
     touched,
     logged,
-    children: async (_userId: string, parentPath: string) => nodes.filter((n) => n.parentPath === parentPath),
-    search: async () => [],
+    searches,
+    search: async (_userId: string, query: string, options: { branch?: string; kind?: string; limit?: number } = {}) => {
+      searches.push({ query, ...options });
+      return nodes
+        .filter((n) => (!options.branch || n.branch === options.branch) && (!options.kind || n.kind === options.kind))
+        .slice(0, options.limit ?? 6)
+        .map((node, i) => ({ node, score: 0.9 - i * 0.1 }));
+    },
     touch: async (_userId: string, paths: string[]) => {
       touched.push(...paths);
     },
@@ -223,24 +230,17 @@ function fakeRepo(nodes: MemoryNode[]) {
   };
 }
 
-check("recall walks the tree level by level, following only what Jev picks", async () => {
+check("recall vector-searches skills after Jev routes, with no second Jev pass", async () => {
   const repo = fakeRepo(TREE);
-  const jev = scriptedJev([
-    () => ({ route: { type: "choice", choice: "personal", confidence: 0.9, probabilities: {} } }),
-    // Level 0: relationships yes, travel no.
-    (q) => Object.fromEntries(Object.keys(q).map((id, i) => [id, { type: "noul", noul: i === 0 ? 0.95 : 0.05 } as JevAnswer])),
-    // Level 1: family yes.
-    () => ({ c0: { type: "noul", noul: 0.9 } }),
-    // Level 2: priya (first child) yes, dad no.
-    (q) => Object.fromEntries(Object.keys(q).map((id, i) => [id, { type: "noul", noul: i === 0 ? 0.97 : 0.1 } as JevAnswer])),
-  ]);
+  const jev = scriptedJev([() => ({ route: { type: "choice", choice: "personal", confidence: 0.9, probabilities: {} } })]);
 
   const result = await recall({ repo, jev, userId: "u1" }, "text my sister", "Caller: text my sister");
   assert.equal(result.route, "personal");
-  assert.deepEqual(result.personal.map((n) => n.path), ["personal/relationships/family/priya"]);
+  assert.deepEqual(result.personal.map((n) => n.path), ["personal/relationships/family/priya", "personal/relationships/family/dad"]);
   assert.deepEqual(result.workflow, []);
-  assert.equal(jev.calls, 4);
-  assert.deepEqual(repo.touched, ["personal/relationships/family/priya"]);
+  assert.equal(jev.calls, 1);
+  assert.deepEqual(repo.searches, [{ query: "text my sister", branch: "personal", kind: "skill", limit: 6 }]);
+  assert.deepEqual(repo.touched, ["personal/relationships/family/priya", "personal/relationships/family/dad"]);
   assert.match(renderRecall(result), /About the caller[\s\S]*@priya_s/);
 });
 
@@ -250,20 +250,21 @@ check("a confident none from the router reads nothing", async () => {
   const result = await recall({ repo, jev, userId: "u1" }, "thanks, bye", "Caller: thanks, bye");
   assert.equal(result.personal.length + result.workflow.length, 0);
   assert.equal(jev.calls, 1);
+  assert.deepEqual(repo.searches, []);
   assert.equal(renderRecall(result), "");
 });
 
-check("an unsure router tries both branches rather than guessing", async () => {
+check("an unsure router searches both branches rather than guessing", async () => {
   const repo = fakeRepo(TREE);
-  const jev = scriptedJev([
-    () => ({ route: { type: "choice", choice: "workflow", confidence: 0.3, probabilities: {} } }),
-    () => ({ c0: { type: "noul", noul: 0.9 } }),
-    () => ({ c0: { type: "noul", noul: 0.9 } }),
-    () => ({ c0: { type: "noul", noul: 0.9 } }),
-  ]);
+  const jev = scriptedJev([() => ({ route: { type: "choice", choice: "workflow", confidence: 0.3, probabilities: {} } })]);
   const result = await recall({ repo, jev, userId: "u1" }, "send it to priya", "Caller: send it to priya");
-  // The workflow branch is empty so it costs no Jev call; personal is walked.
-  assert.deepEqual(result.personal.map((n) => n.path), ["personal/relationships/family/priya"]);
+  assert.equal(jev.calls, 1);
+  assert.deepEqual(
+    repo.searches.map((s) => s.branch),
+    ["personal", "workflow"],
+  );
+  assert.deepEqual(result.personal.map((n) => n.path), ["personal/relationships/family/priya", "personal/relationships/family/dad"]);
+  assert.deepEqual(result.workflow, []);
 });
 
 /* ----------------------------------------------------------- consolidate */

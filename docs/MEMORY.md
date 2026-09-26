@@ -38,8 +38,8 @@ Database `ailobang`, on the hackathon sandbox cluster.
 | `memory_events` | every Jev route, recall, upsert and delete, with confidence and before/after |
 | `calls` | the transcript and work record of each finished call |
 
-Indexes on `memory_nodes`: `{userId, path}`, `{userId, parentPath}` for the
-tree walk, and `memory_vector`, an Atlas Vector Search index that
+Indexes on `memory_nodes`: `{userId, path}`, `{userId, parentPath}` for listing
+a folder, and `memory_vector`, an Atlas Vector Search index that
 **auto-embeds** `searchText` with `voyage-4-lite` (filters: `userId`, `branch`,
 `kind`). No embedding call happens in the Worker: Atlas embeds on write and
 takes a plain-text `query` on `$vectorSearch`.
@@ -50,11 +50,9 @@ Runs in the harness before the model starts, on the caller's latest line.
 
 1. **Route.** One Jev `choice`: `none` / `personal` / `workflow` / `both`.
    A confident `none` ends it. An unsure answer tries both branches.
-2. **Walk.** From the branch root, Jev is shown the folder's children and
-   answers a `noul` per child — would this help? — in one request per level.
-   Folders it picks are walked into; skills it picks are the result.
-3. **Fallback.** When the walk finds nothing, Vector Search offers the closest
-   skills by meaning and Jev vets them the same way.
+2. **Search.** For each branch, Atlas Vector Search returns the closest
+   skills by meaning (up to 6). Those skills are used as-is — Jev does not
+   vet them.
 
 What comes back is put at the top of the model's request as "What you
 remember". The personal skills are also rendered into GPT-Live's instructions
