@@ -36,6 +36,15 @@ import {
   type ConnectedAccount,
 } from "./composio";
 import { renderCallPage } from "./call-page";
+import { renderChatPage, renderHistoryPage } from "./chats-page";
+import {
+  countChats,
+  isChatId,
+  listChats,
+  readChat,
+  whenPhrase,
+  type ChatSummary,
+} from "./chats";
 import { renderTelegramPage } from "./telegram-page";
 import type { TelegramStatus } from "./telegram";
 import {
@@ -91,6 +100,10 @@ const PHONE_SKIP_COOKIE = "alb_phone_skip";
 const PHONE_SKIP_TTL_SECONDS = 60 * 60 * 24 * 365;
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const PKCE_TTL_SECONDS = 60 * 10;
+/** How many calls the accounts page lists before it points at the full history. */
+const RECENT_CHATS = 5;
+/** How many the history page itself lists. */
+const HISTORY_LIMIT = 100;
 
 interface WorkOSUser {
   id: string;
@@ -191,6 +204,14 @@ async function route(request: Request, env: Env): Promise<Response> {
     return startConnect(request, env, path.slice("/connect/".length));
   }
 
+  // One conversation from the history. The id is in the path, so the shape is
+  // checked before it can reach a query.
+  if (path.startsWith("/chat/")) {
+    const id = path.slice("/chat/".length);
+    if (!isChatId(id)) return errorPage(404, "Call not found", "That call is not one of yours.");
+    return chatScreen(request, env, id);
+  }
+
   switch (path) {
     case "/":
       // Signed in, the landing page offers nothing but the button that got
@@ -219,6 +240,8 @@ async function route(request: Request, env: Env): Promise<Response> {
       return memoryPage(request, env);
     case "/memory.json":
       return memoryData(request, env);
+    case "/history":
+      return historyScreen(request, env);
     case "/phone":
       return phoneScreen(request, env);
     case "/phone/skip":
@@ -397,6 +420,11 @@ async function appPage(request: Request, env: Env): Promise<Response> {
   const telegram = await telegramStatus(env, session.sub);
   const banks = await plaidBanksOrEmpty(env, session.sub);
   const phone = await phoneLinkOrNull(env, session.sub);
+  const recent = await chatListOrEmpty(env, session.sub);
+  // The full count is only worth asking for when the list is long enough that
+  // there is more to it than what the panel already shows.
+  const recentTotal =
+    recent.length < RECENT_CHATS ? recent.length : await chatCountOrEmpty(env, session.sub);
 
   const html = renderConnectionsPage(session, accounts, telegram, banks, phone, env.TELNYX_PHONE_NUMBER, {
     justConnected,
@@ -404,7 +432,10 @@ async function appPage(request: Request, env: Env): Promise<Response> {
     disconnectFailed,
     denied,
     warning,
-  });  return new Response(html, {
+    recent,
+    recentTotal,
+  });
+  return new Response(html, {
     headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
   });
 }
@@ -415,11 +446,25 @@ async function callPage(request: Request, env: Env): Promise<Response> {
   if (!session) return redirect("/signin", request);
 
   const phone = await phoneLinkOrNull(env, session.sub);
+
+  // A chat named in the query continues that conversation instead of starting a
+  // new one. A chat that is not the caller's is ignored rather than refused:
+  // they still get a working call.
+  const requested = new URL(request.url).searchParams.get("chat");
+  const continuing = requested && isChatId(requested) ? await readChat(env.DB, session.sub, requested) : null;
+
   return new Response(
     renderCallPage({
       email: session.email,
       userId: session.sub,
       phone: { linked: phone?.phone ?? null, callNumber: env.TELNYX_PHONE_NUMBER },
+      continuing: continuing
+        ? {
+            id: continuing.chat.id,
+            title: continuing.chat.title,
+            lines: continuing.lines.map((line) => ({ role: line.role, text: line.text })),
+          }
+        : null,
     }),
     { headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" } },
   );
@@ -461,6 +506,67 @@ async function memoryData(request: Request, env: Env): Promise<Response> {
   } catch (error) {
     console.error("memory snapshot failed", error);
     return Response.json({ error: "memory unavailable" }, { status: 503 });
+  }
+}
+
+/* ------------------------------------------------------------------- calls */
+
+/** Every call the user has had, newest first. */
+async function historyScreen(request: Request, env: Env): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  const chats = await chatListOrEmpty(env, session.sub, HISTORY_LIMIT);
+  const html = renderHistoryPage({
+    email: session.email,
+    userId: session.sub,
+    chats,
+    now: new Date(),
+  });
+  return new Response(html, {
+    headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/** One conversation, read back. */
+async function chatScreen(request: Request, env: Env, id: string): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  const found = await readChat(env.DB, session.sub, id);
+  if (!found) return errorPage(404, "Call not found", "That call is not one of yours.");
+
+  const html = renderChatPage({
+    email: session.email,
+    userId: session.sub,
+    chat: found.chat,
+    lines: found.lines,
+    now: new Date(),
+  });
+  return new Response(html, {
+    headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * History is a nicety, so a database that cannot answer leaves the page as it
+ * was rather than failing the one thing the page is for.
+ */
+async function chatListOrEmpty(env: Env, userId: string, limit = RECENT_CHATS): Promise<ChatSummary[]> {
+  try {
+    return await listChats(env.DB, userId, limit);
+  } catch (error) {
+    console.error("listing calls failed", error);
+    return [];
+  }
+}
+
+async function chatCountOrEmpty(env: Env, userId: string): Promise<number> {
+  try {
+    return await countChats(env.DB, userId);
+  } catch (error) {
+    console.error("counting calls failed", error);
+    return 0;
   }
 }
 
@@ -1064,6 +1170,8 @@ function renderConnectionsPage(
     disconnectFailed: string | null;
     denied: string | null;
     warning: string | null;
+    recent: ChatSummary[];
+    recentTotal: number;
   },
 ): string {
   // Composio answers for every row but Telegram's and Plaid's, which are counted
@@ -1082,6 +1190,7 @@ function renderConnectionsPage(
             <path d="M12 18v3" />
           </svg>`;
 
+  const now = new Date();
   const googleAccount = accounts.get(GOOGLE_GROUP.toolkit);
   const groupServices = googleConnectors();
   const shownServices = groupServices.slice(0, GOOGLESUPER_VISIBLE_SERVICES);
@@ -1349,6 +1458,17 @@ function renderConnectionsPage(
       .hints { padding: 18px 20px; border-style: dashed; background: transparent; box-shadow: none; }
       .hints ul { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
       .hints li + li { margin-top: 4px; }
+      .calls { padding: 16px 18px 14px; }
+      .rowhead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+      .calls .more { color: var(--muted); font-size: 12.5px; text-decoration: none; }
+      .calls .more:hover { color: var(--fg); text-decoration: underline; }
+      .calls ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 2px; }
+      .calls a { display: block; padding: 8px 10px; margin: 0 -10px; border-radius: 10px;
+        color: inherit; text-decoration: none; }
+      .calls a:hover { background: rgba(127, 127, 127, 0.12); }
+      .calls .ct { display: block; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .calls .cm { display: block; margin-top: 1px; color: var(--muted); font-size: 12.5px; }
+      .calls .none { margin: 10px 0 2px; color: var(--muted); font-size: 13px; }
       /* On phones the rail moves above the shelf, and the call action follows
          the scroll from the bottom of the screen. */
       .callbar { display: none; }
@@ -1478,6 +1598,7 @@ ${callIcon}
             <span class="callhint">The transcript appears as you talk.</span>
           </a>
 ${phonePanel(phone, callNumber)}
+${recentCallsPanel(flash.recent, flash.recentTotal, now)}
           <div class="panel hints">
             <span class="label">On a call</span>
             <ul>
@@ -1529,6 +1650,7 @@ ${rows}
       <span>${callIcon} Start call</span>
     </a>
 ${copyNumberScript}
+${timeHintsScript}
 ${callWidget(session.sub)}
   </body>
 </html>`;
@@ -1564,6 +1686,22 @@ function phonePanel(phone: PhoneLink | null, callNumber: string): string {
 }
 
 /**
+ * Puts the exact instant behind each relative timestamp.
+ *
+ * The panel says "4 minutes ago", which reads the same in every time zone;
+ * hovering one shows the caller's own clock, which the server cannot know.
+ */
+const timeHintsScript = `<script>
+      (function () {
+        var nodes = document.querySelectorAll("time[datetime]");
+        for (var i = 0; i < nodes.length; i++) {
+          var at = new Date(nodes[i].getAttribute("datetime"));
+          if (!isNaN(at.getTime())) nodes[i].title = at.toLocaleString();
+        }
+      })();
+    </script>`;
+
+/**
  * Copy is a nicety rather than the point of the panel, so when the clipboard
  * is unavailable (an insecure origin, a browser that blocks it) the number is
  * left selected for the reader to copy by hand instead.
@@ -1595,6 +1733,42 @@ const copyNumberScript = `<script>
         });
       })();
     </script>`;
+
+/**
+ * The rail's list of recent calls, each one a way back into that conversation.
+ *
+ * Only the last few are shown: the panel sits above the shelf, and the whole
+ * history has a page of its own. A call nobody has made yet leaves a line of
+ * muted text rather than an empty box, so the panel still says what it is for.
+ */
+function recentCallsPanel(chats: ChatSummary[], total: number, now: Date): string {
+  const more =
+    total > chats.length ? `<a class="more" href="/history">All ${total}</a>` : "";
+  const body = chats.length
+    ? `<ul>
+${chats
+  .map(
+    (chat) => `              <li>
+                <a href="/chat/${encodeURIComponent(chat.id)}">
+                  <span class="ct">${escapeHtml(chat.title)}</span>
+                  <span class="cm">Started <time datetime="${escapeHtml(chat.startedAt)}">${escapeHtml(
+                    whenPhrase(chat.startedAt, now),
+                  )}</time></span>
+                </a>
+              </li>`,
+  )
+  .join("\n")}
+            </ul>`
+    : `<p class="none">Nothing yet. Start a call and it will be here afterwards.</p>`;
+
+  return `          <div class="panel calls">
+            <div class="rowhead">
+              <span class="label">Recent calls</span>
+              ${more}
+            </div>
+${body}
+          </div>`;
+}
 
 /**
  * Rows sharing one connection are disconnected together, so the prompt has to

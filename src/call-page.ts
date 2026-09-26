@@ -15,11 +15,21 @@ export interface CallPageOptions {
   userId: string;
   /** The other way in: dialling `callNumber` from the `linked` number. */
   phone?: { linked: string | null; callNumber: string };
+  /**
+   * The conversation this call continues, when the page was reached from the
+   * history. The agent is given what was said and adds to the same chat, and
+   * the transcript opens with it so the caller can see where they left off.
+   */
+  continuing?: {
+    id: string;
+    title: string;
+    lines: readonly { role: string; text: string }[];
+  } | null;
 }
 
 const FRAME_SAMPLES = 480; // 20 ms at 24 kHz
 
-export function renderCallPage({ email, userId, phone }: CallPageOptions): string {
+export function renderCallPage({ email, userId, phone, continuing = null }: CallPageOptions): string {
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -152,6 +162,9 @@ export function renderCallPage({ email, userId, phone }: CallPageOptions): strin
       .log p:last-child { margin-bottom: 0; }
       .log .label { display: block; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
       .log .you .label { color: var(--muted); }
+      .log .pastlabel { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+      .log .past { color: var(--muted); border-left: 2px solid var(--border); padding-left: 12px; }
+      .log .past p:last-child { margin-bottom: 10px; }
       .empty { color: var(--muted); font-size: 14px; }
       .dialin { margin: 14px 0 0; text-align: center; color: var(--muted); font-size: 13.5px; }
       .dialin a { color: inherit; font-weight: 550; }
@@ -184,6 +197,7 @@ export function renderCallPage({ email, userId, phone }: CallPageOptions): strin
         <p class="note" id="note" hidden></p>
         <p class="error" id="error" hidden></p>
       </div>
+${continuingLine(continuing)}
 ${phoneLine(phone)}
 
       <div class="card">
@@ -194,13 +208,17 @@ ${phoneLine(phone)}
             <button class="action" id="download" type="button" hidden>Download</button>
           </div>
         </div>
-        <div class="log" id="log"><p class="empty">Nothing yet. The conversation shows up here as you talk.</p></div>
+        <div class="log" id="log">${earlierLines(continuing)}</div>
       </div>
     </div>
 
     <script>
       (function () {
         var USER_ID = ${JSON.stringify(userId)};
+        /* Which conversation the call belongs to. The page starts with whatever
+           the URL names, and the agent answers with the id it actually wrote
+           to, which is then put back in the URL so a reload lands on it. */
+        var CHAT_ID = ${JSON.stringify(continuing?.id ?? null)};
         var SAMPLE_RATE = 24000;
         var FRAME_SAMPLES = ${FRAME_SAMPLES};
         var SPEECH_RMS = 0.02;
@@ -214,6 +232,9 @@ ${phoneLine(phone)}
         var noteEl = document.getElementById("note");
         var errorEl = document.getElementById("error");
         var logEl = document.getElementById("log");
+        // A call that opens with the earlier conversation in it starts at the
+        // end of that conversation, which is where the caller left off.
+        if (logEl.scrollHeight > logEl.clientHeight) logEl.scrollTop = logEl.scrollHeight;
         var copyBtn = document.getElementById("copy");
         var downloadBtn = document.getElementById("download");
         var muteBtn = document.getElementById("mute");
@@ -484,6 +505,14 @@ ${phoneLine(phone)}
             }
           } else if (message.type === "transcript") {
             appendLine(message.role, message.delta);
+          } else if (message.type === "chat") {
+            // A call that was not continuing an earlier one is now a chat of its
+            // own, so the URL comes to name it rather than the page title it
+            // under a conversation it has nothing to do with.
+            if (message.id && message.id !== CHAT_ID) {
+              CHAT_ID = message.id;
+              history.replaceState(null, "", "/call?chat=" + encodeURIComponent(message.id));
+            }
           } else if (message.type === "working") {
             setNote(message.note);
           } else if (message.type === "error") {
@@ -564,7 +593,10 @@ ${phoneLine(phone)}
         /** The agent keeps a call alive for a minute, so a dropped socket resumes it. */
         function connectSocket() {
           var protocol = location.protocol === "https:" ? "wss:" : "ws:";
-          socket = new WebSocket(protocol + "//" + location.host + "/agents/voice-agent/" + encodeURIComponent(USER_ID));
+          var query = CHAT_ID ? "?chat=" + encodeURIComponent(CHAT_ID) : "";
+          socket = new WebSocket(
+            protocol + "//" + location.host + "/agents/voice-agent/" + encodeURIComponent(USER_ID) + query
+          );
           socket.binaryType = "arraybuffer";
           socket.onmessage = onMessage;
           socket.onerror = function () { setError("The call connection dropped."); };
@@ -622,6 +654,40 @@ function phoneLine(phone: CallPageOptions["phone"]): string {
   return phone.linked
     ? `      <p class="dialin">Away from the site? Call ${dial} from ${escapeHtml(formatPhone(phone.linked))}.</p>`
     : `      <p class="dialin">You can also call ${dial} from your phone. <a href="/phone">Link your number</a> first.</p>`;
+}
+
+/**
+ * What the transcript panel holds before the caller says anything.
+ *
+ * A call that continues an earlier one opens with what was said then, set back
+ * in muted type under its own heading, so "and send him that" has a visible
+ * "that". A fresh call has nothing to show and says so.
+ */
+function earlierLines(continuing: CallPageOptions["continuing"]): string {
+  const said = continuing?.lines ?? [];
+  if (!said.length) {
+    return `<p class="empty">Nothing yet. The conversation shows up here as you talk.</p>`;
+  }
+  const past = said
+    .map(
+      (line) =>
+        `        <p class="${line.role === "user" ? "user" : "assistant"}"><span class="label">${
+          line.role === "user" ? "You" : "Assistant"
+        }</span><span class="text">${escapeHtml(line.text)}</span></p>`,
+    )
+    .join("\n");
+  return `<p class="pastlabel">Earlier in this call</p>
+      <div class="past">
+${past}
+      </div>
+      <p class="empty">Press the microphone and carry on from there.</p>`;
+}
+
+function continuingLine(continuing: CallPageOptions["continuing"]): string {
+  if (!continuing) return "";
+  return `      <p class="dialin">Continuing &ldquo;${escapeHtml(continuing.title)}&rdquo;. <a href="/chat/${encodeURIComponent(
+    continuing.id,
+  )}">Read it back</a>.</p>`;
 }
 
 function escapeHtml(value: string): string {

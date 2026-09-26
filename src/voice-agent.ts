@@ -21,6 +21,7 @@ import {
   type WSMessage,
 } from "agents";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { ChatRecorder, type ChatChannel } from "./chats";
 import { CODE_TIMEOUT_MS } from "./code-tool";
 import { createToolRouterSession } from "./composio";
 import { DelegationQueue } from "./delegation-queue";
@@ -59,15 +60,24 @@ const BRIEF_TIMEOUT_MS = 1500;
 const MAX_QUEUED_DELEGATIONS = 3;
 /** `WebSocket.readyState` for an open socket. */
 const OPEN = 1;
+/**
+ * How long a spoken line may sit unwritten.
+ *
+ * Lines arrive as deltas, many per second, so they are batched: a chat survives
+ * a crash at the cost of at most this much of the end of the call.
+ */
+const CHAT_FLUSH_MS = 1200;
 /** Connection tags: a call page's socket, or the live-call widget following along. */
 const CALLER_TAG = "caller";
 const WATCH_TAG = "watch";
 
-export type CallChannel = "site" | "phone";
+export type CallChannel = ChatChannel;
 
 interface TranscriptLine {
   role: "user" | "assistant";
   text: string;
+  /** When the line started, so a stored transcript keeps its own times. */
+  at: string;
 }
 
 export type PhoneAnswer = "accepted" | "busy" | "duplicate" | "failed";
@@ -76,7 +86,6 @@ export class VoiceAgent extends Agent<Env> {
   private live: WebSocket | null = null;
   private liveReady = false;
   private greeted = false;
-  private transcript: TranscriptLine[] = [];
   private harness: ConnectorHarness | null = null;
   /** Answers one delegation at a time, in the order they arrived. */
   private readonly delegations = new DelegationQueue(MAX_QUEUED_DELEGATIONS, (error) =>
@@ -94,6 +103,21 @@ export class VoiceAgent extends Agent<Env> {
   private phoneSessionId: string | null = null;
   /** When this call began, for the record that is kept of it. */
   private callStartedAt: string | null = null;
+
+  /* --------------------------------------------------------------- history */
+
+  /**
+   * The chat this call is being written to.
+   *
+   * Held in memory rather than in storage: a chat only matters while the call
+   * that writes it is running, and a call that loses the object loses its
+   * transcript anyway. The lines it holds are what the widget and the harness
+   * read, so there is one copy of the conversation rather than two.
+   */
+  private chat: ChatRecorder | null = null;
+  private chatFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set when the call is being ended on purpose, rather than having dropped. */
+  private callEnding = false;
 
   /** Call-page sockets. The live-call widget's sockets only watch, and don't count. */
   private connectionCount(): number {
@@ -115,15 +139,18 @@ export class VoiceAgent extends Agent<Env> {
     return this.phoneSessionId ? "phone" : "site";
   }
 
-  async onConnect(connection: Connection, _context: ConnectionContext): Promise<void> {
+  async onConnect(connection: Connection, context: ConnectionContext): Promise<void> {
     // A watcher only follows along. It gets the call so far and then the same
     // transcript broadcasts as the call page, and never starts a session.
     if (connection.tags.includes(WATCH_TAG)) {
-      connection.send(JSON.stringify({ type: "watch", channel: this.channel(), lines: this.transcript }));
+      connection.send(JSON.stringify({ type: "watch", channel: this.channel(), lines: this.chat?.spoken ?? [] }));
       return;
     }
 
     // A caller returning within the grace window resumes the call in flight.
+    // A call that was hung up has already had its chat closed, so coming back
+    // after one is a new call rather than a reconnection to an old one.
+    const returning = this.teardownTimer !== null && this.chat !== null;
     if (this.teardownTimer) {
       clearTimeout(this.teardownTimer);
       this.teardownTimer = null;
@@ -143,9 +170,20 @@ export class VoiceAgent extends Agent<Env> {
       // A socket can die without its close event ever reaching this object
       // (an idle session ended by OpenAI, a hibernation gap), so the field is
       // only trusted while the socket is actually open.
-      if (this.live?.readyState !== OPEN) await this.openLiveSession();
+      const starting = this.live?.readyState !== OPEN;
+      // A call that is not being picked up again is a new one, and it either
+      // continues the chat the page asked for or opens a fresh one.
+      if (!returning && starting) await this.beginCall("site", new URL(context.request.url).searchParams.get("chat"));
+      if (starting) await this.openLiveSession();
       console.log("voice agent: caller connected", JSON.stringify({ connections: this.connectionCount(), liveReady: this.liveReady }));
       connection.send(JSON.stringify({ type: "call", state: this.liveReady ? "live" : "connecting" }));
+      connection.send(
+        JSON.stringify({
+          type: "chat",
+          id: this.chat?.id ?? null,
+          resumed: (this.chat?.resumed.length ?? 0) > 0,
+        }),
+      );
     } catch (error) {
       console.error("voice agent: live session failed", error);
       connection.send(
@@ -183,7 +221,13 @@ export class VoiceAgent extends Agent<Env> {
     // laptop or a network blip should resume the conversation, not kill it.
     this.teardownTimer = setTimeout(() => {
       this.teardownTimer = null;
-      if (this.connectionCount() === 0) this.closeLiveSession("caller never came back");
+      if (this.connectionCount() !== 0) return;
+      // The live socket can already be gone — the call dropped and the caller
+      // never came back — in which case there is nothing left to close, but the
+      // chat is still open and has to be finished.
+      this.callEnding = true;
+      this.closeLiveSession("caller never came back");
+      this.finishChat();
     }, RECONNECT_GRACE_MS);
   }
 
@@ -220,7 +264,7 @@ export class VoiceAgent extends Agent<Env> {
       event_id: `start_${Date.now()}`,
       session: {
         model: LIVE_MODEL,
-        instructions: conversationPrompt("site", brief),
+        instructions: conversationPrompt("site", brief, this.chat?.resumePrompt() ?? ""),
         audio: { format: { type: "audio/pcm", rate: SAMPLE_RATE }, output: { voice: VOICE } },
         delegation: { type: "client" },
         store: false,
@@ -255,6 +299,9 @@ export class VoiceAgent extends Agent<Env> {
     }
 
     const brief = await this.memoryBrief();
+    // A phone call has no page behind it to name a chat, so it always starts a
+    // new one. Opening it reads nothing before the accept below.
+    await this.beginCall("phone", null);
     const accepted = await this.liveCallAction(sessionId, "accept", {
       session: {
         type: "live",
@@ -336,7 +383,6 @@ export class VoiceAgent extends Agent<Env> {
 
     this.live = socket;
     this.greeted = false;
-    this.transcript = [];
     this.callStartedAt = new Date().toISOString();
   }
 
@@ -345,6 +391,8 @@ export class VoiceAgent extends Agent<Env> {
     if (!socket) return;
 
     console.log("voice agent: closing live session", JSON.stringify({ reason }));
+    // Asked for, so the call is over rather than dropped and waiting to resume.
+    this.callEnding = true;
     this.sendLive({ type: "session.close", event_id: `close_${Date.now()}` });
     setTimeout(() => {
       if (this.live === socket) this.onLiveClosed(`close timed out (${reason})`);
@@ -360,7 +408,13 @@ export class VoiceAgent extends Agent<Env> {
     this.notify({ type: "call", state: "ended", reason });
     // The call is over: what it leaves in long-term memory is decided now, off
     // the call's path, from the whole conversation and everything the tools did.
+    // It reads the chat, so it runs before the chat is closed and cleared.
     this.keepMemory("call", this.harness?.allWork() ?? null, true);
+    // The phone owns its call and has no way back in, so its end is the call's
+    // end. A site call that merely lost its live socket waits for the caller,
+    // who can still be reconnected and carried on with.
+    if (this.callEnding || this.phoneSessionId) this.finishChat();
+    this.callEnding = false;
     this.live = null;
     this.liveReady = false;
     this.harness = null;
@@ -473,6 +527,7 @@ export class VoiceAgent extends Agent<Env> {
 
       case "session.closed":
         this.notify({ type: "call", state: "ended", seconds: event.usage?.seconds ?? null });
+        this.callEnding = true;
         this.onLiveClosed("gpt-live ended the session");
         break;
 
@@ -501,8 +556,9 @@ export class VoiceAgent extends Agent<Env> {
         type: "session.instructions.append",
         event_id: `greet_${eventId}`,
         delegation_id: null,
-        content:
-          "Greet the caller in one short sentence: say you can help with their connected accounts, then stop and listen.",
+        content: this.chat?.resumed.length
+          ? "Greet the caller in one short sentence, then carry on from where the earlier conversation left off."
+          : "Greet the caller in one short sentence: say you can help with their connected accounts, then stop and listen.",
       });
       this.sendLive({
         type: "session.commentary.append",
@@ -648,19 +704,75 @@ export class VoiceAgent extends Agent<Env> {
 
   private addTranscript(role: TranscriptLine["role"], delta: string): void {
     if (!delta) return;
-
-    const last = this.transcript[this.transcript.length - 1];
-    if (last?.role === role) last.text += delta;
-    else this.transcript.push({ role, text: delta });
-
+    this.chat?.addLine(role, delta);
     this.notify({ type: "transcript", role, delta });
+    this.scheduleChatFlush();
   }
 
+  /**
+   * The conversation so far, including whatever an earlier call left behind.
+   *
+   * A continued call starts with an empty transcript, so without the earlier
+   * lines "and send that to him" would reach the harness with no "that" in it.
+   */
   private transcriptText(): string {
-    return this.transcript
-      .map((line) => `${line.role === "user" ? "Caller" : "Assistant"}: ${line.text.trim()}`)
-      .join("\n")
-      .slice(-8000);
+    return this.chat?.text() ?? "";
+  }
+
+  /* ----------------------------------------------------------------- chats */
+
+  /**
+   * Starts writing the call to a chat: the one the page named, or a new one.
+   *
+   * A chat the caller does not own reads as no chat at all, so a stale link
+   * still gets them a working call.
+   */
+  private async beginCall(channel: ChatChannel, requested: string | null): Promise<void> {
+    const chat = new ChatRecorder({ db: this.env.DB, userId: this.name, channel, resumeId: requested });
+    await chat.load();
+    this.chat = chat;
+    console.log("voice agent: call chat", JSON.stringify({ chat: chat.id, continues: chat.continues }));
+  }
+  private scheduleChatFlush(): void {
+    if (this.chatFlushTimer) return;
+    this.chatFlushTimer = setTimeout(() => {
+      this.chatFlushTimer = null;
+      // Nothing is waiting on this: lines arrive on a socket message, and the
+      // call has to keep carrying audio while the write goes out.
+      void this.flushChat();
+    }, CHAT_FLUSH_MS);
+  }
+
+  /**
+   * Writes the lines spoken since the last flush.
+   *
+   * A failed write is logged and swallowed: losing history must never cost a
+   * call. The recorder chains the writes itself, so two cannot race.
+   */
+  private async flushChat(chat = this.chat): Promise<void> {
+    if (!chat) return;
+    try {
+      const { opened } = await chat.flush();
+      // A page that continued an earlier call already has the id in its URL;
+      // only a chat that started here needs telling.
+      if (opened && !chat.continues) this.notify({ type: "chat", id: chat.id });
+    } catch (error) {
+      console.error("voice agent: writing the chat failed", error);
+    }
+  }
+
+  /** Closes the chat at the end of a call. Only the first caller closes it. */
+  private finishChat(chat = this.chat): void {
+    this.chat = null;
+    if (!chat) return;
+    if (this.chatFlushTimer) {
+      clearTimeout(this.chatFlushTimer);
+      this.chatFlushTimer = null;
+    }
+    // Nothing is waiting on this: the call is already over, and the write has
+    // to outlive the event that started it.
+    void this.ctx
+      .waitUntil(chat.finish().catch((error) => console.error("voice agent: closing the chat failed", error)));
   }
 
   private sendLive(payload: unknown): void {
@@ -669,7 +781,7 @@ export class VoiceAgent extends Agent<Env> {
   }
 }
 
-function conversationPrompt(channel: "site" | "phone", brief = ""): string {
+function conversationPrompt(channel: "site" | "phone", brief = "", earlier = ""): string {
   const opening =
     channel === "phone"
       ? "You are Ailobang's voice assistant, on a phone call with someone who dialled in from the number linked to their account, which has some of their accounts connected."
@@ -685,7 +797,7 @@ The backend keeps this memory. When the caller tells you to remember or forget s
   return `${opening}
 
 ${memory}
-
+${earlier ? `\n${earlier}\n` : ""}
 Tone: warm, brief, natural. Most replies are one or two sentences. Never read out markdown, lists or URLs.
 
 Backend tools: the backend can read and act on the caller's connected accounts — Google (Gmail, Drive, Calendar, Sheets, Docs, Photos, Contacts, Tasks), Telegram, Reddit, LinkedIn, Slack, Notion, Discord, Google Maps, Cursor, and the bank accounts they linked through Plaid (balances and transactions, read-only). It can also search the live internet.
