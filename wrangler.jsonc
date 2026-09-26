@@ -76,6 +76,12 @@
     "PLAID_ENV": "production"
   },
   "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "ailobang.com",
+      "custom_domain": true
+    }
+  ],
   "observability": {
     "enabled": true
   }
