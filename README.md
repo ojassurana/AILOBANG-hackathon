@@ -64,6 +64,31 @@ you ──call──▶ +1 (407) 358-0773 ──▶ Telnyx ──▶ voice bridg
 | Telephony | Telnyx | Inbound numbers + media streaming |
 | Voice agent | OpenAI GPT-Live 1 | Speech-to-speech, tool calling, no STT→LLM→TTS relay |
 | Auth | Email + password | PBKDF2/WebCrypto hash, HttpOnly session cookie |
+| Long-term memory | MongoDB Atlas | Per-user tree of folders and skills; Vector Search finds them by meaning |
+
+## Long-term memory
+
+What the assistant learns lives in MongoDB Atlas, in the `ailobang` database, one
+tree per user. Two roots are fixed, `personal/` and `workflow/`, and everything
+under them is the agent's own doing. Each folder and skill is a document in
+`memory_nodes`, joined into a tree by `path` and `parentPath`. `memory_events`
+holds every routing decision, recall, upsert and delete with what changed, and
+`calls` holds the transcript and work record of each finished call.
+
+Search goes through Atlas Vector Search. The `memory_vector` index auto-embeds
+`memory_nodes.searchText` with `voyage-4-lite`, so the Worker sends plain words as
+the query and never calls an embedding API itself. Reads and writes route through
+Jev, a small decision model that picks the branch: `recall` runs before the model
+and pulls the closest skills on the caller's latest line, while `consolidate` runs
+after the turn, turning a conversation into upserts and deletes and checking
+Vector Search for an existing twin before it adds a node.
+
+One Durable Object per user (`MemoryStore`) holds a warm `MongoClient` and is the
+single writer of that user's tree, so the voice agent and the coding chat cannot
+overwrite each other. Agents call it over RPC. The connection string is the
+`MONGODB_URI` secret, a `mongodb+srv://` user with readWrite on `ailobang`; unset,
+the agents run without memory and `/memory` says so.
+[`docs/MEMORY.md`](docs/MEMORY.md) covers the design in full.
 
 ## Status
 
