@@ -52,6 +52,17 @@ import {
   restartLogin,
 } from "./telegram-session";
 import { password as passwordHelper } from "teleproto";
+import { CustomFile } from "teleproto/client/uploads";
+import { Buffer } from "node:buffer";
+import {
+  MAX_FILE_BYTES,
+  type OutgoingFile,
+  type SettledFile,
+  fileFingerprint,
+  fileNameFor,
+  settleFile,
+  tooBig,
+} from "./telegram-files";
 
 /**
  * How much of the conversation we keep. Both limits are deliberately small: the
@@ -1099,55 +1110,132 @@ export class TelegramSession extends DurableObject<Env> {
    * so there is none to go stale.
    */
   async send(to: string, text: string): Promise<SendResult> {
-    const refused = (reason: string, title: string | null = null): SendResult => ({
-      ok: false,
-      reason,
-      to: null,
-      title,
-      text: null,
-      alreadySentAt: null,
-    });
-
     const body = text.trim();
-    if (!body) return refused("There was no message to send.");
+    if (!body) return refusedSend("There was no message to send.");
 
+    return this.deliver(to, body, body, async () => (client, peer) =>
+      client.sendMessage(peer, { message: body }),
+    );
+  }
+
+  /**
+   * Sends a file — a photo, a video, a voice note, any document — the same way
+   * `send` sends text: one call, the same recipient lookup, the same caps, and
+   * the same file to the same person moments later is reported rather than sent
+   * twice. A link is downloaded here rather than handed to Telegram, because
+   * the signed links other tools return are not ones Telegram's servers fetch.
+   */
+  async sendFile(to: string, file: OutgoingFile): Promise<SendResult> {
+    const settled = settleFile(file ?? {});
+    if ("reason" in settled) return refusedSend(settled.reason);
+
+    const fingerprint = fileFingerprint(settled, settled.filename ?? "");
+    let shownName = settled.filename ?? "file";
+
+    return this.deliver(to, fingerprint, () => `[${shownName}] ${settled.caption}`.trim(), async () => {
+      const loaded = await this.loadFile(settled);
+      if ("reason" in loaded) return loaded;
+      shownName = loaded.name;
+
+      const upload = new CustomFile(loaded.name, loaded.bytes.byteLength, "", Buffer.from(loaded.bytes));
+      return (client, peer) =>
+        client.sendFile(peer, {
+          file: upload,
+          caption: settled.caption || undefined,
+          forceDocument: settled.mode === "document",
+          voiceNote: settled.mode === "voice",
+          supportsStreaming: true,
+          // Each worker is a media socket of its own; a few is plenty for 20 MB.
+          workers: 4,
+        });
+    });
+  }
+
+  /** The bytes and final name of a settled file, fetching a link when that is the source. */
+  private async loadFile(
+    file: SettledFile,
+  ): Promise<{ bytes: Uint8Array; name: string } | { reason: string }> {
+    if (file.source.kind === "bytes") {
+      return { bytes: file.source.bytes, name: fileNameFor(file.filename, file.source.mimeType, null) };
+    }
+
+    const url = file.source.url;
+    let response: Response;
+    try {
+      response = await fetch(url, { redirect: "follow" });
+    } catch (error) {
+      return { reason: `The file link could not be reached (${String(error).slice(0, 120)}), so nothing was sent.` };
+    }
+    if (!response.ok) {
+      return { reason: `The file link answered ${response.status}, so nothing was sent; it may have expired.` };
+    }
+    const declared = Number(response.headers.get("content-length") ?? "0");
+    if (declared > MAX_FILE_BYTES) return { reason: tooBig(declared) };
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!bytes.byteLength) return { reason: "The file link returned an empty file, so nothing was sent." };
+    if (bytes.byteLength > MAX_FILE_BYTES) return { reason: tooBig(bytes.byteLength) };
+
+    return { bytes, name: fileNameFor(file.filename, response.headers.get("content-type"), url) };
+  }
+
+  /**
+   * What every send shares: who `to` is, whether this has just gone to them,
+   * the caps, the peer, and the record of it afterwards.
+   *
+   * `prepare` runs only once all of that has allowed the send, so a download is
+   * never made for a message the caps would refuse, and it runs before the
+   * socket opens, so no connection sits idle while a file comes in.
+   */
+  private async deliver(
+    to: string,
+    fingerprint: string,
+    shown: string | (() => string),
+    prepare: () => Promise<
+      ((client: TelegramClient, peer: string | Api.InputPeerUser) => Promise<Api.Message>) | { reason: string }
+    >,
+  ): Promise<SendResult> {
     const blocked = this.notConnectedReason();
-    if (blocked) return refused(blocked);
+    if (blocked) return refusedSend(blocked);
 
     const settled = await this.recipientFor(to);
-    if ("reason" in settled) return refused(settled.reason);
+    if ("reason" in settled) return refusedSend(settled.reason);
     const recipient = settled.recipient;
     const address = sendAddress(recipient);
     const key = sendKey(address);
+    const said = () => (typeof shown === "string" ? shown : shown());
     const done = (alreadySentAt: number | null): SendResult => ({
       ok: true,
       reason: null,
       to: spokenAddress(address),
       title: recipient.title,
-      text: body,
+      text: said(),
       alreadySentAt,
     });
 
-    const repeat = repeatSentAt(this.recentSends(key), body, Date.now());
+    const repeat = repeatSentAt(this.recentSends(key), fingerprint, Date.now());
     if (repeat !== null) return done(repeat);
 
     const verdict = this.capVerdict(key);
-    if (!verdict.allowed) return refused(verdict.reason ?? "That can't be sent right now.", recipient.title);
+    if (!verdict.allowed) return refusedSend(verdict.reason ?? "That can't be sent right now.", recipient.title);
+
+    const sendWith = await prepare();
+    if ("reason" in sendWith) return refusedSend(sendWith.reason, recipient.title);
 
     const userId = addressUserId(address);
     try {
       const sent = await this.withClient(async (client) => {
-        if (userId === null) return client.sendMessage(address, { message: body });
+        if (userId === null) return sendWith(client, address);
 
         // The id is all the lookup kept, so the peer is built from the hash
         // this call fetches. A stored hash would address whoever it points at
         // now, which is why a failed lookup sends nothing instead.
         const peer = await this.peerForUserId(client, userId, recipient.title);
-        return peer ? client.sendMessage(peer, { message: body }) : null;
+        return peer ? sendWith(client, peer) : null;
       });
 
       if (!sent) {
-        return refused(
+        return refusedSend(
           `Telegram isn't giving me ${recipient.title} to send to, so nothing was sent. Say that ` +
             `plainly: retrying the same name will not change it, and only an @username the caller ` +
             `knows would reach them.`,
@@ -1155,28 +1243,29 @@ export class TelegramSession extends DurableObject<Env> {
         );
       }
 
-      this.recordSend(address, recipient.title, body);
+      this.recordSend(address, recipient.title, fingerprint);
       if (sent.className === "Message") {
-        const line = this.storable(sent as Api.Message, new Map());
-        if (line) {
+        const message = sent as Api.Message;
+        const peer = message.peerId;
+        if (peer && peer.className === "PeerUser") {
           this.ctx.storage.sql.exec(
             `INSERT INTO messages (chat, message_id, chat_title, from_name, outgoing, text, sent_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(chat, message_id) DO UPDATE SET text = excluded.text`,
-            line.chat,
-            line.messageId,
+            `user:${String((peer as Api.PeerUser).userId)}`,
+            Number(message.id),
             recipient.title,
             "you",
             1,
-            line.text,
-            line.sentAt,
+            said(),
+            Number(message.date) * 1000,
           );
         }
       }
     } catch (error) {
       this.recordLoginError(error);
       const classified = classifyTelegramError(error, telegramErrorShape(error));
-      return refused(classified.message, recipient.title);
+      return refusedSend(classified.message, recipient.title);
     }
 
     return done(null);
@@ -1271,6 +1360,10 @@ export class TelegramSession extends DurableObject<Env> {
       now: Date.now(),
     });
   }
+}
+
+function refusedSend(reason: string, title: string | null = null): SendResult {
+  return { ok: false, reason, to: null, title, text: null, alreadySentAt: null };
 }
 
 /** The name to show for a Telegram user, preferring the real name. */

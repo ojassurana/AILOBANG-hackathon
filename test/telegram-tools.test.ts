@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { TELEGRAM_TOOLS, TelegramToolbox, isTelegramTool, type TelegramActions } from "../src/telegram-tools";
 import type { ChatSummary, MessageLine, SendResult, TelegramStatus } from "../src/telegram";
 import type { ContactCandidate } from "../src/telegram-contacts";
+import { type OutgoingFile, fileFingerprint, fileNameFor, settleFile, MAX_FILE_BYTES } from "../src/telegram-files";
 
 let passed = 0;
 let failed = 0;
@@ -54,6 +55,7 @@ interface Recorded {
   readMessages: { chat: string; limit: number | undefined }[];
   lookups: string[];
   sends: { to: string; text: string }[];
+  fileSends: { to: string; file: OutgoingFile }[];
 }
 
 function fake(options: {
@@ -63,7 +65,7 @@ function fake(options: {
   contacts?: ContactCandidate[];
   send?: Partial<SendResult>;
 } = {}) {
-  const recorded: Recorded = { listChats: [], readMessages: [], lookups: [], sends: [] };
+  const recorded: Recorded = { listChats: [], readMessages: [], lookups: [], sends: [], fileSends: [] };
 
   const telegram: TelegramActions = {
     async status() {
@@ -93,6 +95,18 @@ function fake(options: {
         ...options.send,
       };
     },
+    async sendFile(to: string, file: OutgoingFile) {
+      recorded.fileSends.push({ to, file });
+      return {
+        ok: true,
+        reason: null,
+        to: "@himanshu",
+        title: "Himanshu",
+        text: `[${file.filename ?? "file"}] ${file.caption ?? ""}`.trim(),
+        alreadySentAt: null,
+        ...options.send,
+      };
+    },
   };
 
   return { toolbox: new TelegramToolbox(telegram), recorded, telegram };
@@ -109,6 +123,7 @@ check("every tool refuses to act without a connection, and says so", async () =>
     }
     // Nothing reached the object: the refusal is decided before any read.
     assert.deepEqual(recorded.sends, []);
+    assert.deepEqual(recorded.fileSends, []);
     assert.deepEqual(recorded.listChats, []);
     assert.deepEqual(recorded.lookups, []);
   }
@@ -328,6 +343,91 @@ check("a send that did not happen is never reported as sent", async () => {
   assert.equal(answer, "Telegram is asking us to slow down. Try again in a minute.");
 });
 
+/* ------------------------------------------------------------------- files */
+
+check("a file link goes to the object as given, with its caption and name", async () => {
+  const { toolbox, recorded } = fake();
+  const answer = await toolbox.run(
+    "telegram_send_file",
+    '{"to":"Himanshu","url":"https://example.com/chair.jpg","filename":"chair.jpg","caption":"This one?"}',
+  );
+  assert.equal(answer, "Sent to Himanshu (@himanshu): [chair.jpg] This one?.");
+  assert.equal(recorded.fileSends.length, 1);
+  assert.equal(recorded.fileSends[0].to, "Himanshu");
+  assert.equal(recorded.fileSends[0].file.url, "https://example.com/chair.jpg");
+  assert.equal(recorded.fileSends[0].file.as, "auto");
+});
+
+check("a file send needs a recipient and a file", async () => {
+  const { toolbox, recorded } = fake();
+  assert.match(await toolbox.run("telegram_send_file", '{"url":"https://x.test/a.pdf"}'), /who to send to/);
+  assert.match(await toolbox.run("telegram_send_file", '{"to":"Himanshu"}'), /a url to download, the text content, or base64/);
+  assert.deepEqual(recorded.fileSends, []);
+});
+
+check("a repeated file is reported as already gone", async () => {
+  const { toolbox } = fake({ send: { alreadySentAt: Date.UTC(2026, 8, 26, 16, 0, 0) } });
+  const answer = await toolbox.run("telegram_send_file", '{"to":"Himanshu","content":"hi","filename":"a.txt"}');
+  assert.match(answer, /^Already sent that file to Himanshu/);
+});
+
+check("a file that did not go is never reported as sent", async () => {
+  const { toolbox } = fake({ send: { ok: false, reason: "The file link answered 403, so nothing was sent." } });
+  const answer = await toolbox.run("telegram_send_file", '{"to":"Himanshu","url":"https://x.test/a.pdf"}');
+  assert.equal(answer, "The file link answered 403, so nothing was sent.");
+});
+
+check("a file request takes exactly one source", () => {
+  assert.match((settleFile({}) as { reason: string }).reason, /no file to send/);
+  assert.match(
+    (settleFile({ url: "https://x.test/a", content: "hi" }) as { reason: string }).reason,
+    /only one of/,
+  );
+  assert.match((settleFile({ url: "file:///etc/passwd" }) as { reason: string }).reason, /http and https/);
+  assert.match((settleFile({ base64: "!!!" }) as { reason: string }).reason, /could not be decoded/);
+});
+
+check("text content becomes a named text file, and bytes decode from base64 or a data URL", () => {
+  const note = settleFile({ content: "a,b\n1,2", filename: "sheet.csv" });
+  assert.ok(!("reason" in note));
+  assert.equal(note.filename, "sheet.csv");
+  assert.equal(note.source.kind, "bytes");
+
+  const unnamed = settleFile({ content: "hello" });
+  assert.ok(!("reason" in unnamed));
+  assert.equal(unnamed.filename, "message.txt");
+
+  const png = settleFile({ base64: "data:image/png;base64,iVBORw0KGgo=" });
+  assert.ok(!("reason" in png));
+  assert.equal(png.source.kind === "bytes" && png.source.bytes[1], 0x50);
+});
+
+check("text past the size limit is refused before anything is sent", () => {
+  const huge = settleFile({ content: "x".repeat(MAX_FILE_BYTES + 1) });
+  assert.match((huge as { reason: string }).reason, /at most 20 MB/);
+});
+
+check("a file is named so its extension says what it is", () => {
+  assert.equal(fileNameFor("report.pdf", "application/octet-stream", null), "report.pdf");
+  assert.equal(fileNameFor("chair", "image/jpeg", null), "chair.jpg");
+  assert.equal(fileNameFor(null, "image/png; charset=binary", "https://cdn.test/img/abc%20def"), "abc def.png");
+  assert.equal(fileNameFor(null, null, "https://cdn.test/files/deck.pptx?sig=1"), "deck.pptx");
+  assert.equal(fileNameFor(null, null, "https://cdn.test/"), "file");
+  // A path in the name is never kept: the recipient sees a name, not a directory.
+  const settled = settleFile({ content: "x", filename: "../../secret/notes.txt" });
+  assert.ok(!("reason" in settled));
+  assert.equal(settled.filename, "notes.txt");
+});
+
+check("the same file to the same person fingerprints the same, a different caption does not", () => {
+  const a = settleFile({ url: "https://x.test/a.pdf", caption: "Here" });
+  const b = settleFile({ url: "https://x.test/a.pdf", caption: "Here" });
+  const c = settleFile({ url: "https://x.test/a.pdf", caption: "Other" });
+  assert.ok(!("reason" in a) && !("reason" in b) && !("reason" in c));
+  assert.equal(fileFingerprint(a, "a.pdf"), fileFingerprint(b, "a.pdf"));
+  assert.notEqual(fileFingerprint(a, "a.pdf"), fileFingerprint(c, "a.pdf"));
+});
+
 /* ------------------------------------------------------------------- schema */
 
 check("every tool is named and described for the model that has to choose it", () => {
@@ -337,6 +437,7 @@ check("every tool is named and described for the model that has to choose it", (
     "telegram_read_messages",
     "telegram_find_contact",
     "telegram_send",
+    "telegram_send_file",
   ]);
   for (const tool of TELEGRAM_TOOLS) {
     assert.ok((tool.function.description ?? "").length > 80, `${tool.function.name} needs a description`);

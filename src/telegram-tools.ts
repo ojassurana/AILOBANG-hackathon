@@ -3,8 +3,8 @@
  *
  * Telegram is not a Composio toolkit, so it is absent from the meta-tools the
  * MCP session exposes: the connection is this app's own Durable Object, holding
- * the caller's real account rather than a bot. These four tools are the only way
- * the harness reaches it.
+ * the caller's real account rather than a bot. These tools are the only way the
+ * harness reaches it.
  *
  * They keep the promises the screens make. Reading is forward-only — the stored
  * messages begin at the login, so there is nothing older to return even by
@@ -16,6 +16,7 @@
 import type { ToolSchema } from "./deepseek";
 import type { ChatSummary, MessageLine, SendResult, TelegramStatus } from "./telegram";
 import { type ContactCandidate, type ContactSource, describeCandidate } from "./telegram-contacts";
+import type { FileMode, OutgoingFile } from "./telegram-files";
 
 /** The part of `TelegramSession` these tools use. */
 export interface TelegramActions {
@@ -24,12 +25,14 @@ export interface TelegramActions {
   readMessages(chat: string, limit?: number): Promise<MessageLine[]>;
   findContacts(name: string): Promise<ContactCandidate[]>;
   send(to: string, text: string): Promise<SendResult>;
+  sendFile(to: string, file: OutgoingFile): Promise<SendResult>;
 }
 
 const LIST_CHATS = "telegram_list_chats";
 const READ_MESSAGES = "telegram_read_messages";
 const FIND_CONTACT = "telegram_find_contact";
 const SEND = "telegram_send";
+const SEND_FILE = "telegram_send_file";
 
 /** Where a candidate was found, said the way it would be said out loud. */
 const SOURCE_NOTE: Record<ContactSource, string> = {
@@ -130,9 +133,51 @@ export const TELEGRAM_TOOLS: ToolSchema[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: SEND_FILE,
+      description:
+        "Send a file from the caller's own Telegram account, right now: a photo, a video, a voice " +
+        "note, a PDF, a spreadsheet — any file up to 20 MB. Same rules as telegram_send: the caller " +
+        "asking is the go-ahead, a name is enough and a contact with no @username is still reached, " +
+        "a name several people answer to is refused with the candidates, and the same file to the " +
+        "same person within a few minutes is not sent twice. Give exactly one source: url (a " +
+        "download link another tool returned, such as a Drive or Composio file link or an image " +
+        "URL), content (text to send as a file, e.g. a note or CSV you wrote), or base64 (raw bytes).",
+      parameters: {
+        type: "object",
+        properties: {
+          to: {
+            type: "string",
+            description:
+              "Who to send to: the name the caller said, or their @username. A name alone is enough.",
+          },
+          url: { type: "string", description: "An http(s) link to download the file from." },
+          content: { type: "string", description: "Text to send as the file's contents." },
+          base64: { type: "string", description: "The file's bytes, base64-encoded." },
+          filename: {
+            type: "string",
+            description:
+              "The name the recipient sees, with its extension (report.pdf, photo.jpg). The extension " +
+              "decides photo, video or document; when omitted it comes from the link.",
+          },
+          caption: { type: "string", description: "Optional text shown with the file." },
+          as: {
+            type: "string",
+            enum: ["auto", "document", "voice"],
+            description:
+              "auto (default) shows .jpg/.png as a photo and videos as videos; document sends the " +
+              "original file uncompressed; voice sends .ogg audio as a voice note.",
+          },
+        },
+        required: ["to"],
+      },
+    },
+  },
 ];
 
-const TOOL_NAMES = new Set([LIST_CHATS, READ_MESSAGES, FIND_CONTACT, SEND]);
+const TOOL_NAMES = new Set([LIST_CHATS, READ_MESSAGES, FIND_CONTACT, SEND, SEND_FILE]);
 
 export function isTelegramTool(name: string): boolean {
   return TOOL_NAMES.has(name);
@@ -162,6 +207,8 @@ export class TelegramToolbox {
         return this.findContact(rawArguments);
       case SEND:
         return this.send(rawArguments);
+      case SEND_FILE:
+        return this.sendFile(rawArguments);
       default:
         return `There is no Telegram tool called ${name}.`;
     }
@@ -295,6 +342,36 @@ export class TelegramToolbox {
       );
     }
     return `Sent to ${who}: "${sent.text ?? body}".`;
+  }
+
+  private async sendFile(rawArguments: string): Promise<string> {
+    const args = parseArguments(rawArguments);
+    const to = text(args.to);
+    if (!to) return `Give ${SEND_FILE} who to send to: the name the caller said, or their @username.`;
+
+    const file: OutgoingFile = {
+      url: text(args.url) || undefined,
+      content: typeof args.content === "string" && args.content ? args.content : undefined,
+      base64: text(args.base64) || undefined,
+      filename: text(args.filename) || undefined,
+      caption: text(args.caption) || undefined,
+      as: (text(args.as) || "auto") as FileMode,
+    };
+    if (!file.url && !file.content && !file.base64) {
+      return `Give ${SEND_FILE} the file: a url to download, the text content, or base64 bytes.`;
+    }
+
+    const sent = await this.telegram.sendFile(to, file);
+    if (!sent.ok) return sent.reason ?? "The file was not sent.";
+
+    const who = addressed(sent.title ?? sent.to ?? "them", sent.to);
+    if (sent.alreadySentAt !== null) {
+      return (
+        `Already sent that file to ${who} at ${iso(sent.alreadySentAt)}. It was not sent again. ` +
+        `Tell the caller it has gone.`
+      );
+    }
+    return `Sent to ${who}: ${sent.text ?? "the file"}.`;
   }
 }
 

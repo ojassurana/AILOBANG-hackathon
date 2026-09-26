@@ -85,6 +85,11 @@ a message was sent only when telegram_send says it was, and then say who it went
 to. When the message should carry something another tool makes (a document's
 link, say), make that first and put the real result in the text.
 
+Files go with telegram_send_file, under the same rules: photos, videos, voice
+notes, PDFs, spreadsheets, anything up to 20 MB. Pass a download link another
+tool returned as url, or text you wrote as content with a filename, and never
+paste a link into telegram_send when the caller asked for the file itself.
+
 The caller never has to spell out a handle. Pass the name as they said it — a
 first name, a nickname, a full name — and telegram_send resolves it. If several
 people fit, it sends nothing and lists them: ask which one they mean rather than
@@ -130,6 +135,7 @@ const PROGRESS_NOTES: Record<string, string> = {
   telegram_read_messages: "Reading your Telegram messages.",
   telegram_find_contact: "Working out who you mean.",
   telegram_send: "Sending the Telegram message.",
+  telegram_send_file: "Sending the file on Telegram.",
   [RUN_CODE]: "Working through that now.",
 };
 

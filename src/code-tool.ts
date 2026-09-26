@@ -18,6 +18,7 @@ import type { ToolSchema } from "./deepseek";
 import type { WebResult } from "./exa";
 import type { McpClient } from "./mcp";
 import type { TelegramActions } from "./telegram-tools";
+import type { OutgoingFile } from "./telegram-files";
 
 export const RUN_CODE = "run_code";
 
@@ -77,7 +78,9 @@ export const RUN_CODE_TOOL: ToolSchema = {
       "  web.search(query, numResults?) -> [{ title, url, text }].\n" +
       "  telegram.listChats(limit?), telegram.readMessages(chat, limit?), " +
       "telegram.findContacts(name) -> arrays; telegram.send(to, text) sends one message now, " +
-      "to a name or @username -> { ok, reason, title, text, alreadySentAt }.\n" +
+      "to a name or @username -> { ok, reason, title, text, alreadySentAt }; " +
+      "telegram.sendFile(to, { url | content | base64, filename?, caption?, as? }) sends one file " +
+      "(photo, video, document, up to 20 MB) the same way — url can be a Composio download link.\n" +
       "Each Composio call takes seconds, so never await calls one by one in a loop when they do " +
       "not depend on each other: put them in one composio.runAll. Await in sequence only when a " +
       "call needs an earlier call's result.\n" +
@@ -226,6 +229,17 @@ export class CodeToolbox {
             );
             return sent;
           },
+          sendFile: async (to: unknown, file: unknown) => {
+            await connected();
+            const sent = await telegram.sendFile(String(to ?? ""), fileArgument(file));
+            const who = sent.title ?? String(to ?? "");
+            trace.push(
+              sent.ok
+                ? `telegram.sendFile to ${who} ${sent.alreadySentAt !== null ? "already sent earlier" : "ok"}`
+                : `telegram.sendFile to ${who} failed: ${(sent.reason ?? "").slice(0, 160)}`,
+            );
+            return sent;
+          },
         },
       });
     }
@@ -354,4 +368,18 @@ function describeError(error: unknown): string | null {
 
 function count(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** A program's file argument, keeping only the fields a file send reads. */
+function fileArgument(value: unknown): OutgoingFile {
+  const given = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const field = (name: string) => (typeof given[name] === "string" ? (given[name] as string) : undefined);
+  return {
+    url: field("url"),
+    content: field("content"),
+    base64: field("base64"),
+    filename: field("filename"),
+    caption: field("caption"),
+    as: field("as") as OutgoingFile["as"],
+  };
 }
