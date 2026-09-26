@@ -707,7 +707,26 @@ function renderConnectionsPage(
         transform: rotate(45deg);
         transition: transform 0.15s ease;
       }
-      .grp[open] .chev { transform: rotate(-135deg); }
+      /* Scoped to the group's own summary: a row inside the body has its own
+         chevron, and the group opening must not flip it too. */
+      .grp[open] > summary .chev { transform: rotate(-135deg); }
+      .cap { margin-top: 6px; }
+      .cap > summary {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12.5px;
+        font-weight: 550;
+        cursor: pointer;
+        list-style: none;
+      }
+      .cap > summary::-webkit-details-marker { display: none; }
+      .cap > summary:hover { color: var(--fg); }
+      .cap .chev { width: 6px; height: 6px; margin-left: 0; border-width: 1.5px; }
+      .cap[open] > summary .chev { transform: rotate(-135deg); }
+      .cap ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
+      .cap li + li { margin-top: 3px; }
       .gact {
         display: flex;
         align-items: center;
@@ -860,12 +879,38 @@ function connectorRow(
                 <span>
                   <span class="nm">${escapeHtml(connector.name)}</span>
                   <span class="bl">${escapeHtml(connector.blurb)}</span>
+                  ${capabilitiesDisclosure(connector)}
                 </span>
               </span>
             </td>
             <td>${state}</td>
             ${actionCell}
           </tr>`;
+}
+
+/**
+ * The row's Capabilities disclosure, listing what the agent can do through that
+ * account. Rows without any render nothing rather than an empty box.
+ */
+function capabilitiesDisclosure(connector: Connector): string {
+  const capabilities = connector.capabilities;
+  if (!capabilities?.length) return "";
+
+  const items = capabilities
+    .map((ability) => `\n                      <li>${escapeHtml(ability)}</li>`)
+    .join("");
+
+  // The visible label stays one word so the row keeps a single line on a phone;
+  // the accessible name carries the connector, which the row itself is the only
+  // other place to learn from.
+  return `<details class="cap">
+                    <summary aria-label="${escapeHtml(connector.name)} capabilities">
+                      <span>Capabilities</span>
+                      <span class="chev"></span>
+                    </summary>
+                    <ul>${items}
+                    </ul>
+                  </details>`;
 }
 
 async function upsertUser(db: D1Database, user: WorkOSUser, organizationId: string | null): Promise<void> {

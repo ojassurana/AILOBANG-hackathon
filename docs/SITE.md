@@ -214,6 +214,25 @@ the `slug` names a row and its URL, the `toolkit` is where the Composio connecti
 `/connect/google` and `/disconnect/google`, so the flash messages read "Google Services" rather
 than the name of whichever service happened to start the flow.
 
+**What each connector can do.** Every row — the ones inside the Google box as well as the ones
+that stand alone — carries a small **Capabilities** disclosure under its blurb, following the same
+collapsible pattern as the Google box: a muted label with a chevron that rotates when it opens.
+Its accessible name is "<connector> capabilities", since the visible label alone would repeat 18
+times without saying which connector it belongs to. The list behind it comes from `capabilities`
+in `src/connectors.ts` and describes what the voice agent can do through that account, in the
+caller's terms ("Find and read your email") rather than as Composio tool slugs. It sits in
+`connectors.ts` so the shelf and its explanation stay together, and a row without `capabilities`
+simply renders no disclosure. The label sits in the row's first cell, so on a phone the opened
+list is as wide as that column rather than the card.
+
+Two of the lists are deliberately narrower than the product names suggest, and their blurbs were
+corrected to match. **Cursor** is the toolkit's five tools — cloud agents and their conversations,
+models, repos, API key info — with no usage or billing tool, so its blurb says "Cloud agents and
+repos" rather than "usage". **Discord** is read-only: Composio's `discord` toolkit is the
+user-OAuth one, which reads the authorizing user's own guilds, role connections and profile, and
+exposes no channel-message tools (those live in the separate Discord Bot toolkit, which needs a
+bot token), so its blurb says "Servers and your profile" rather than "messages".
+
 Not every Google toolkit in Composio is part of that consent, so those are deliberately **not**
 rows: Google Maps is its own connection (a Cloud API-key service), and Meet, Chat, Classroom,
 BigQuery, Cloud Vision, Admin, Search Console, Data Studio and Address Validation are separate
