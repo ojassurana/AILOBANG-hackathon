@@ -357,6 +357,9 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
           if (message.type === "call") {
             if (message.state === "live") {
               state = "live";
+              // The button is disabled while starting; give it back so the same
+              // press can end the call.
+              mic.disabled = false;
               mic.dataset.state = "live";
               mic.setAttribute("aria-label", "End the call");
               setStatus("Live", "ok");
@@ -374,6 +377,9 @@ export function renderCallPage({ email, userId }: CallPageOptions): string {
             setNote(message.note);
           } else if (message.type === "error") {
             setError(message.message);
+            // A call that fails before it goes live would otherwise leave the
+            // button disabled and the page stuck with no way to retry.
+            if (state !== "live") finish("Call failed");
           }
         }
 
