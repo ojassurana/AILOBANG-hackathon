@@ -265,9 +265,11 @@ The agent reads the banks through two harness tools in `src/plaid-tools.ts`:
 `plaid_list_accounts` (live balances where the bank offers them, else Plaid's last fetch) and
 `plaid_transactions` (a date range, filtered by merchant, category, account or direction, with
 the spent and received totals added up in code so a spoken total is the real sum). Both are
-read-only; nothing requested from Plaid can move money. In `sandbox` only Plaid's test banks
-work (`user_good` / `pass_good`); real banks need `PLAID_ENV` set to `production` with
-production keys, which Plaid issues once it approves the app for production access.
+read-only; nothing requested from Plaid can move money. The site runs on `production`
+(real banks) since 2026-09-26. Local `wrangler dev` stays on `sandbox` through `.dev.vars`,
+where only Plaid's test banks work (`user_good` / `pass_good`). Items are per environment: a
+sandbox link means nothing in production and the reverse, so switching environments orphans
+every stored bank.
 
 The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
 `googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
