@@ -9,9 +9,9 @@ Live at **https://ailobang.com**
 
 | Route | Purpose |
 | --- | --- |
-| `GET /` | Landing page with a "Log in / Sign up" button |
+| `GET /` | Landing page with a "Log in / Sign up" button (redirects to `/app` if already signed in) |
 | `GET /signin` | Log-in page (redirects to `/app` if already signed in) |
-| `GET /auth/login` | Starts the AuthKit flow: sets a PKCE cookie and redirects to WorkOS |
+| `GET /auth/login` | Starts the AuthKit flow: sets a PKCE cookie and redirects to WorkOS (redirects to `/app` if already signed in) |
 | `GET /callback` | Exchanges the WorkOS code, upserts the user in D1, sets the session cookie |
 | `GET /app` | The post-login **Connect your accounts** page; redirects to `/signin` when signed out |
 | `GET /call` | The call page (a microphone, live transcript, and the voice agent behind them) |

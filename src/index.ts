@@ -191,11 +191,17 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   switch (path) {
     case "/":
+      // Signed in, the landing page offers nothing but the button that got
+      // them here, so send them on to their accounts instead of showing it.
+      if (await currentSession(request, env)) return redirect("/app", request);
       return serveAsset(request, env, "/index.html");
     case "/signin":
       if (await currentSession(request, env)) return redirect("/app", request);
       return serveAsset(request, env, "/signin.html");
     case "/auth/login":
+      // A live session already answers what this flow is for; restarting it
+      // would only put AuthKit in front of someone who has already signed in.
+      if (await currentSession(request, env)) return redirect("/app", request);
       return startLogin(env);
     case "/callback":
       return finishLogin(request, env);
