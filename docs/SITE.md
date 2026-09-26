@@ -233,6 +233,18 @@ same Connect Link endpoint, same callback, same status and Disconnect handling. 
 resolution also still works, because Composio exposes Cursor's
 `get_current_user_endpoint` (`https://api.cursor.com/v0/me`) as the connection's test endpoint.
 
+**Plaid is custom too.** Composio has no `plaid` toolkit; the row uses `plaid_mcp`, Plaid's own
+MCP server, whose only scheme is dynamic client registration:
+
+```json
+{ "toolkit": { "slug": "plaid_mcp" }, "auth_config": { "type": "use_custom_auth", "authScheme": "DCR_OAUTH" } }
+```
+
+No client id or secret is needed — Composio registers the OAuth client with Plaid itself. The
+user signs in to the Plaid Dashboard (scope `mcp:dashboard`), so this reaches a Plaid developer
+team's diagnostics and analytics (teams, Item debugging, Link conversion, usage), not the user's
+bank accounts. Its row slug is `plaid`, its toolkit `plaid_mcp`.
+
 The ids are pinned in `src/connectors.ts`. Toolkit slugs are irregular — `googledrive`,
 `googlesheets`, and `googledocs` have no underscore, unlike `google_maps`.
 
@@ -252,7 +264,7 @@ than the name of whichever service happened to start the flow.
 **What each connector can do.** Every row — the ones inside the Google box as well as the ones
 that stand alone — carries a small **Capabilities** disclosure under its blurb, following the same
 collapsible pattern as the Google box: a muted label with a chevron that rotates when it opens.
-Its accessible name is "<connector> capabilities", since the visible label alone would repeat 18
+Its accessible name is "<connector> capabilities", since the visible label alone would repeat 19
 times without saying which connector it belongs to. The list behind it comes from `capabilities`
 in `src/connectors.ts` and describes what the voice agent can do through that account, in the
 caller's terms ("Find and read your email") rather than as Composio tool slugs. It sits in

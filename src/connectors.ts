@@ -294,6 +294,23 @@ export const CONNECTORS: Connector[] = [
     toolkit: "cursor",
     authConfigId: "ac_KvRPE8I581Gi",
   },
+  {
+    // Composio has no `plaid` toolkit, only Plaid's own MCP server, which reads
+    // a Plaid developer team's dashboard rather than anyone's bank accounts. It
+    // is DCR_OAUTH, not Composio-managed, so the auth config is `use_custom_auth`
+    // and Composio registers the OAuth client itself on first connect.
+    slug: "plaid",
+    name: "Plaid",
+    blurb: "Your Plaid developer dashboard",
+    capabilities: [
+      "See the Plaid teams you belong to",
+      "Diagnose why a linked Item has stopped working",
+      "Pull Link conversion and error rates",
+      "Read product usage and API request volumes",
+    ],
+    toolkit: "plaid_mcp",
+    authConfigId: "ac_UbD2U_5sRG_A",
+  },
 ];
 
 export function connectorBySlug(slug: string): Connector | undefined {
