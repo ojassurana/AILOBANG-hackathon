@@ -1321,7 +1321,8 @@ function renderConnectionsPage(
         align-items: start;
         margin-top: 26px;
       }
-      .rail { position: sticky; top: 24px; display: grid; gap: 14px; }
+      .rail { position: sticky; top: 24px; display: grid; gap: 14px; min-width: 0; }
+      .rail > * { min-width: 0; max-width: 100%; }
       .accounts { min-width: 0; }
       .accounts .card { margin-top: 0; }
       .accounts .card + .card { margin-top: 12px; }
