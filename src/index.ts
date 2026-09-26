@@ -1028,6 +1028,14 @@ function renderConnectionsPage(
     (toolkit) => accounts.get(toolkit)?.status,
     (telegram?.phase === "connected" ? 1 : 0) + (banks.length ? 1 : 0),
   );
+  const progress = Math.round((connected / CONNECTORS.length) * 100);
+
+  const callIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z" />
+            <path d="M19 11a7 7 0 0 1-14 0" />
+            <path d="M12 18v3" />
+          </svg>`;
 
   const googleAccount = accounts.get(GOOGLE_GROUP.toolkit);
   const groupServices = googleConnectors();
@@ -1063,7 +1071,7 @@ function renderConnectionsPage(
                       onsubmit="return confirm('${disconnectConfirmText(GOOGLE_GROUP)}')">
                   <button class="link" type="submit">Disconnect</button>
                 </form>`
-      : `<a class="btn" href="/connect/${GOOGLE_GROUP.slug}">Connect Google</a>`;
+      : `<a class="btn ghost" href="/connect/${GOOGLE_GROUP.slug}">Connect Google</a>`;
 
   const groupRows = googleConnectors()
     .map((connector) => connectorRow(connector, accounts.get(connector.toolkit), true))
@@ -1143,12 +1151,50 @@ function renderConnectionsPage(
         color: var(--fg);
         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       }
-      .shell { max-width: 860px; margin: 0 auto; padding: 48px 20px 72px; }
+      .shell { max-width: 1040px; margin: 0 auto; padding: 48px 20px 72px; }
       .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
       h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: -0.02em; }
       .sub { margin: 0; color: var(--muted); font-size: 14px; }
       .who { color: var(--muted); font-size: 13px; text-align: right; white-space: nowrap; }
       .who a { color: inherit; }
+      /* The page is a rail of call actions beside the shelf of accounts: the
+         rail keeps the two ways to reach the agent at the top of the screen
+         while the list of connections runs long beside it. */
+      .cols {
+        display: grid;
+        grid-template-columns: 340px 1fr;
+        gap: 18px;
+        align-items: start;
+        margin-top: 26px;
+      }
+      .rail { position: sticky; top: 24px; display: grid; gap: 14px; }
+      .accounts { min-width: 0; }
+      .accounts .card { margin-top: 0; }
+      .accounts .card + .card { margin-top: 12px; }
+      .head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 0 2px 10px;
+      }
+      .head h2 { margin: 0; font-size: 16px; letter-spacing: -0.01em; }
+      .count { color: var(--muted); font-size: 13px; }
+      .bar {
+        height: 3px;
+        margin: 0 2px 14px;
+        border-radius: 999px;
+        background: rgba(127, 127, 127, 0.22);
+        overflow: hidden;
+      }
+      .bar i { display: block; height: 100%; background: var(--fg); }
+      .panel {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        box-shadow: var(--shadow);
+      }
+      .dot.off { background: var(--muted); }
       .note { margin: 24px 0 0; padding: 12px 14px; border-radius: 12px; font-size: 14px; }
       .note.ok { background: rgba(26, 155, 82, 0.10); border: 1px solid rgba(26, 155, 82, 0.26); }
       .note.wait { background: rgba(201, 134, 26, 0.10); border: 1px solid rgba(201, 134, 26, 0.26); }
@@ -1201,42 +1247,66 @@ function renderConnectionsPage(
       }
       .btn:hover { opacity: 0.88; }
       .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+      /* The one filled control on the page: starting a call. Everything else,
+         including every row's connect button, stays outlined so that this is
+         the thing the eye lands on. */
       .call {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-        margin-top: 24px;
-        padding: 18px;
+        display: block;
+        padding: 20px;
+        border: 1px solid var(--border);
         border-radius: 16px;
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--card);
+        color: var(--fg);
         text-decoration: none;
         box-shadow: var(--shadow);
       }
-      .call:hover { opacity: 0.92; }
+      .call:hover { border-color: rgba(127, 127, 127, 0.45); }
       .callicon {
         flex: none;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 42px;
-        height: 42px;
-        border-radius: 50%;
+        width: 44px;
+        height: 44px;
+        border-radius: 14px;
         background: rgba(127, 127, 127, 0.22);
       }
       .callicon svg { width: 20px; height: 20px; }
-      .calltext { flex: 1 1 auto; min-width: 0; }
-      .calltitle { display: block; font-weight: 600; font-size: 15.5px; }
-      .callsub { display: block; font-size: 13px; opacity: 0.75; }
+      .calltitle { display: block; margin-top: 14px; font-weight: 600; font-size: 18px; }
+      .callsub { display: block; margin-top: 3px; color: var(--muted); font-size: 13.5px; }
       .callgo {
-        flex: none;
-        padding: 8px 14px;
-        border: 1px solid currentColor;
-        border-radius: 9px;
-        font-size: 13.5px;
+        display: block;
+        margin-top: 16px;
+        padding: 13px 18px;
+        border-radius: 12px;
+        background: var(--accent);
+        color: var(--accent-fg);
+        font-size: 15.5px;
         font-weight: 600;
-        white-space: nowrap;
+        text-align: center;
       }
+      .callhint { display: block; margin-top: 9px; color: var(--muted); font-size: 12.5px; text-align: center; }
+      .line { padding: 20px; }
+      .label { color: var(--muted); font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; }
+      .number {
+        display: block;
+        margin-top: 9px;
+        font-size: 20px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        color: inherit;
+        text-decoration: none;
+      }
+      a.number:hover { text-decoration: underline; }
+      .line .pill { margin-top: 9px; }
+      .line .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+      .linecap { margin: 10px 0 0; color: var(--muted); font-size: 12.5px; }
+      .hints { padding: 18px 20px; border-style: dashed; background: transparent; box-shadow: none; }
+      .hints ul { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
+      .hints li + li { margin-top: 4px; }
+      /* On phones the rail moves above the shelf, and the call action follows
+         the scroll from the bottom of the screen. */
+      .callbar { display: none; }
       .grp > summary {
         display: flex;
         align-items: center;
@@ -1290,13 +1360,41 @@ function renderConnectionsPage(
         padding: 14px 18px 4px;
       }
       .gact .hint { color: var(--muted); font-size: 13px; }
-      .card.phone { margin-top: 14px; }
-      .phonerow { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 18px; }
-      .psub { display: block; color: var(--muted); font-size: 12.5px; }
-      .psub a { color: inherit; font-weight: 550; }
+      @media (max-width: 820px) {
+        .cols { grid-template-columns: 1fr; gap: 16px; }
+        .rail { position: static; }
+        /* Long enough to cover the fixed call bar, which is repeating the
+           action the rail already shows at the top of the page. */
+        .hints { display: none; }
+        .shell { padding-bottom: 104px; }
+        .callbar {
+          position: fixed;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 5;
+          display: block;
+          padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
+          background: linear-gradient(rgba(127, 127, 127, 0), var(--bg) 46%);
+          text-decoration: none;
+        }
+        .callbar span {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 9px;
+          padding: 15px;
+          border-radius: 14px;
+          background: var(--accent);
+          color: var(--accent-fg);
+          font-size: 16px;
+          font-weight: 600;
+        }
+        .callbar svg { width: 20px; height: 20px; }
+      }
       @media (max-width: 560px) {
         .bl, .who { display: none; }
-        .shell { padding: 32px 14px 56px; }
+        .shell { padding: 32px 14px 104px; }
         td { padding: 12px 12px; }
         .btn { padding: 8px 11px; font-size: 13px; }
         /* Wrap rather than clamp: a wide account label sets the whole column's
@@ -1310,9 +1408,6 @@ function renderConnectionsPage(
         .sm-hide { display: none; }
         /* The expanded box lists every service, so the summary strip is noise. */
         .gright .strip { display: none; }
-        /* The call card wraps instead of squeezing its label. */
-        .call { flex-wrap: wrap; }
-        .callgo { width: 100%; text-align: center; }
       }
     </style>
   </head>
@@ -1321,13 +1416,40 @@ function renderConnectionsPage(
       <div class="top">
         <div>
           <h1>Connect your accounts</h1>
-          <p class="sub">${connected} of ${CONNECTORS.length} connected. You can change these any time.</p>
+          <p class="sub">Anything you connect, your agent can look up mid-call.</p>
         </div>
         <div class="who">${escapeHtml(session.email)}<br /><a href="/auth/logout">Log out</a></div>
       </div>
 ${banner}
-      <div class="card">
-        <details class="grp">
+      <div class="cols">
+        <aside class="rail">
+          <a class="call" href="/call">
+            <span class="callicon">
+${callIcon}
+            </span>
+            <span class="calltitle">Call your accounts</span>
+            <span class="callsub">Start a call and just ask. We'll look it up for you.</span>
+            <span class="callgo">Start call</span>
+            <span class="callhint">The transcript appears as you talk.</span>
+          </a>
+${phonePanel(phone, callNumber)}
+          <div class="panel hints">
+            <span class="label">On a call</span>
+            <ul>
+              <li>Read and send your email</li>
+              <li>Check your calendar and files</li>
+              <li>Bank balances and transactions</li>
+            </ul>
+          </div>
+        </aside>
+        <div class="accounts">
+          <div class="head">
+            <h2>Your accounts</h2>
+            <span class="count">${connected} of ${CONNECTORS.length} connected</span>
+          </div>
+          <div class="bar"><i style="width: ${progress}%"></i></div>
+          <div class="card">
+            <details class="grp">
           <summary>
             <span class="gtitle">
               <img src="${logoUrl(GOOGLE_GROUP.toolkit)}" alt="" width="28" height="28" loading="lazy" />
@@ -1347,58 +1469,86 @@ ${banner}
 ${groupRows}
             </table>
           </div>
-        </details>
-      </div>
-      <div class="card">
-        <table>
+            </details>
+          </div>
+          <div class="card">
+            <table>
 ${rows}
-        </table>
+            </table>
+          </div>
+        </div>
       </div>
-      <a class="call" href="/call">
-        <span class="callicon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z" />
-            <path d="M19 11a7 7 0 0 1-14 0" />
-            <path d="M12 18v3" />
-          </svg>
-        </span>
-        <span class="calltext">
-          <span class="calltitle">Call your accounts</span>
-          <span class="callsub">Start a call and just ask. We'll look it up for you.</span>
-        </span>
-        <span class="callgo">Start call</span>
-      </a>
-${phoneCard(phone, callNumber)}
     </div>
+    <a class="callbar" href="/call" aria-label="Start call">
+      <span>${callIcon} Start call</span>
+    </a>
+${copyNumberScript}
 ${callWidget(session.sub)}
   </body>
 </html>`;
 }
 
 /** Calling in by phone: the number to dial once linked, or the way to link one. */
-function phoneCard(phone: PhoneLink | null, callNumber: string): string {
-  const number = escapeHtml(formatPhone(callNumber));
-  const body = phone
-    ? `<span class="nm">Call from your phone</span>
-            <span class="psub">From ${escapeHtml(formatPhone(phone.phone))}, call <a href="tel:${escapeHtml(
-              callNumber,
-            )}">${number}</a>.</span>`
-    : `<span class="nm">Call from your phone</span>
-            <span class="psub">Link your number and call Ailobang at ${number}.</span>`;
+function phonePanel(phone: PhoneLink | null, callNumber: string): string {
+  const number = phone
+    ? `<a class="number" href="tel:${escapeHtml(callNumber)}">${escapeHtml(formatPhone(callNumber))}</a>`
+    : `<span class="number">${escapeHtml(formatPhone(callNumber))}</span>`;
+  const state = phone
+    ? `<span class="pill"><span class="dot ok"></span>Linked to ${escapeHtml(formatPhone(phone.phone))}</span>`
+    : `<span class="pill"><span class="dot off"></span>No number linked</span>`;
   const action = phone
     ? `<a class="btn ghost" href="/phone">Manage</a>`
     : `<a class="btn ghost" href="/phone">Link phone</a>`;
+  const caption = phone
+    ? ""
+    : `<p class="linecap">Link your number and dial Ailobang from any phone.</p>`;
 
-  return `      <div class="card phone">
-        <div class="phonerow">
-          <span>
-            ${body}
-          </span>
-          ${action}
-        </div>
-      </div>`;
+  return `          <div class="panel line">
+            <span class="label">Your line</span>
+            ${number}
+            ${state}
+            <div class="actions">
+              ${action}
+              <button class="btn ghost" type="button" id="alb-copy" data-number="${escapeHtml(
+                callNumber,
+              )}">Copy</button>
+            </div>
+            ${caption}
+          </div>`;
 }
+
+/**
+ * Copy is a nicety rather than the point of the panel, so when the clipboard
+ * is unavailable (an insecure origin, a browser that blocks it) the number is
+ * left selected for the reader to copy by hand instead.
+ */
+const copyNumberScript = `<script>
+      (function () {
+        var button = document.getElementById("alb-copy");
+        if (!button) return;
+        button.addEventListener("click", function () {
+          var select = function () {
+            var node = document.querySelector(".line .number");
+            if (!node) return;
+            var range = document.createRange();
+            range.selectNodeContents(node);
+            var selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+          };
+          var done = function () {
+            var was = button.textContent;
+            button.textContent = "Copied";
+            setTimeout(function () { button.textContent = was; }, 1200);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(button.getAttribute("data-number")).then(done, select);
+          } else {
+            select();
+          }
+        });
+      })();
+    </script>`;
 
 /**
  * Rows sharing one connection are disconnected together, so the prompt has to
@@ -1469,7 +1619,7 @@ function rowMarkup(connector: Connector, state: ConnectorRowState, insideGroup =
         ? ""
         : state.actionKind === "reconnect"
           ? `<a class="btn ghost" href="${href}">${escapeHtml(state.actionLabel)}</a>`
-          : `<a class="btn" href="${href}">${escapeHtml(state.actionLabel)}${
+          : `<a class="btn ghost" href="${href}">${escapeHtml(state.actionLabel)}${
               state.actionKind === "connect" ? `<span class="sm-hide"> now</span>` : ""
             }</a>`;
 
