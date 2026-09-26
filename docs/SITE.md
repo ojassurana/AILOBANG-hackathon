@@ -58,6 +58,7 @@ Secrets (set with `npx wrangler secret put <NAME>`):
   reading connected accounts
 - `OPENAI_API_KEY` — OpenAI project key, used for the GPT-Live voice session
 - `DEEPSEEK_API_KEY` — DeepSeek key, used by the call harness to choose and run tools
+- `EXA_API_KEY` — Exa key, used by the harness for its built-in web search
 
 For local development, create `.dev.vars` with those five names set.
 
@@ -155,6 +156,13 @@ is search → schema → execute.
 
 Notes worth keeping in mind:
 
+- **Web search is built in, not a connector.** The harness always carries a `web_search` tool
+  (`src/exa.ts`) alongside the Composio ones, so the assistant can answer questions about the
+  world outside the caller's accounts — news, current events, anything that changed recently. It
+  deliberately has no row on the connector page: it is a capability of the agent, not an account
+  the caller connects. The live prompt tells GPT-Live to delegate such questions rather than
+  answer from memory, and the harness prompt tells the backend to prefer an account tool whenever
+  one answers the question.
 - Audio only flows one way through the model when the caller's microphone stream is flowing. The
   page streams silence from the moment the call connects, including while the caller is quiet;
   without that, appended context is never acknowledged.

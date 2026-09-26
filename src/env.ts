@@ -9,4 +9,5 @@ export interface Env extends Cloudflare.Env {
   COMPOSIO_API_KEY: string;
   OPENAI_API_KEY: string;
   DEEPSEEK_API_KEY: string;
+  EXA_API_KEY: string;
 }

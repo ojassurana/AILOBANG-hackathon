@@ -13,6 +13,7 @@
  */
 
 import { chatWithTools, type ChatMessage, type ToolSchema } from "./deepseek";
+import { webSearch } from "./exa";
 import type { McpClient, McpTool } from "./mcp";
 
 /** Enough for search → schema → execute plus a summary; a cap keeps calls snappy. */
@@ -31,7 +32,14 @@ which detail you still need instead of guessing.
 ## Connected accounts
 The tools below act on the caller's own connected accounts: Google (Gmail, Drive,
 Calendar, Sheets, Docs, Photos, Contacts, Tasks), Reddit, LinkedIn, Slack, Notion,
-Discord and Google Maps.
+Discord, Google Maps and Cursor.
+
+## Web search
+web_search looks things up on the live internet. Use it for anything about the
+world outside the caller's accounts — news, current events, prices, releases,
+documentation, facts that may have changed since you were trained. Do not use it
+for the caller's own data, and prefer an account tool whenever one answers the
+question. If a search returns nothing useful, say so rather than guessing.
 
 ## How to use the tools
 1. COMPOSIO_SEARCH_TOOLS with the caller's request as the use case, to find the
@@ -50,6 +58,7 @@ claim an action succeeded unless a tool result says it did.`;
 
 /** Maps a meta-tool call to something worth showing, and briefly saying, mid-task. */
 const PROGRESS_NOTES: Record<string, string> = {
+  web_search: "Searching the web.",
   COMPOSIO_SEARCH_TOOLS: "Looking through your connected apps.",
   COMPOSIO_GET_TOOL_SCHEMAS: "Checking how to fetch that.",
   COMPOSIO_MULTI_EXECUTE_TOOL: "Fetching that now.",
@@ -58,30 +67,54 @@ const PROGRESS_NOTES: Record<string, string> = {
   COMPOSIO_MANAGE_CONNECTIONS: "Checking your connections.",
 };
 
+/** Built in rather than exposed as a connector: the harness owns this capability. */
+const WEB_SEARCH_TOOL: ToolSchema = {
+  type: "function",
+  function: {
+    name: "web_search",
+    description:
+      "Search the live internet for facts about the world outside the caller's accounts: news, " +
+      "current events, prices, releases, documentation. Returns the top results with their text. " +
+      "Do not use it for the caller's private data.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "What to search for." },
+        numResults: {
+          type: "integer",
+          description: "How many results to return. Defaults to 5, maximum 8.",
+        },
+      },
+      required: ["query"],
+    },
+  },
+};
+
 export interface HarnessResult {
   text: string;
   steps: string[];
 }
 
 export class ConnectorHarness {
-  private schemas: ToolSchema[] | null = null;
+  private mcpSchemas: ToolSchema[] | null = null;
 
   constructor(
     private readonly mcp: McpClient,
     private readonly deepseekKey: string,
+    private readonly exaKey: string,
     private readonly userId: string,
   ) {}
 
   /** Opens the MCP session and caches the tool list for later delegations. */
   async warmUp(): Promise<void> {
-    if (this.schemas) return;
+    if (this.mcpSchemas) return;
     await this.mcp.initialize();
-    this.schemas = toSchemas(await this.mcp.listTools());
+    this.mcpSchemas = toSchemas(await this.mcp.listTools());
   }
 
   async run(transcript: string, onProgress: (note: string) => void): Promise<HarnessResult> {
     await this.warmUp();
-    const schemas = this.schemas ?? [];
+    const schemas = [...(this.mcpSchemas ?? []), WEB_SEARCH_TOOL];
 
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
@@ -116,8 +149,10 @@ export class ConnectorHarness {
 
         let output: string;
         try {
-          const result = await this.mcp.callTool(call.name, parseArguments(call.arguments));
-          output = result.text || "(the tool returned nothing)";
+          output =
+            call.name === WEB_SEARCH_TOOL.function.name
+              ? await this.search(call.arguments)
+              : await this.mcpCall(call.name, call.arguments);
         } catch (error) {
           output = `The tool call failed: ${errorMessage(error)}`;
         }
@@ -130,6 +165,23 @@ export class ConnectorHarness {
       text: truncate(answer ?? "I could not find that. Please try asking again.", MAX_ANSWER_CHARS),
       steps,
     };
+  }
+
+  private async mcpCall(name: string, rawArguments: string): Promise<string> {
+    const result = await this.mcp.callTool(name, parseArguments(rawArguments));
+    return result.text || "(the tool returned nothing)";
+  }
+
+  /** Flattens Exa results into text the model can answer from without another call. */
+  private async search(rawArguments: string): Promise<string> {
+    const args = parseArguments(rawArguments) as { query?: string; numResults?: number };
+    const query = (args.query ?? "").trim();
+    if (!query) return "web_search needs a query.";
+
+    const results = await webSearch(this.exaKey, query, args.numResults ?? 5);
+    if (!results.length) return `The web search for "${query}" returned nothing.`;
+
+    return results.map((result) => `${result.title}\n${result.url}\n${result.text}`).join("\n\n");
   }
 }
 

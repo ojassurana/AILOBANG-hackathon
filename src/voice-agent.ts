@@ -312,6 +312,7 @@ export class VoiceAgent extends Agent<Env> {
     const harness = new ConnectorHarness(
       new McpClient(session.mcpUrl, this.env.COMPOSIO_API_KEY),
       this.env.DEEPSEEK_API_KEY,
+      this.env.EXA_API_KEY,
       this.name,
     );
     await harness.warmUp();
@@ -364,12 +365,15 @@ function conversationPrompt(): string {
 
 Tone: warm, brief, natural. Most replies are one or two sentences. Never read out markdown, lists or URLs.
 
-Backend tools: the backend can read and act on the caller's connected accounts — Google (Gmail, Drive, Calendar, Sheets, Docs, Photos, Contacts, Tasks), Reddit, LinkedIn, Slack, Notion, Discord and Google Maps.
+Backend tools: the backend can read and act on the caller's connected accounts — Google (Gmail, Drive, Calendar, Sheets, Docs, Photos, Contacts, Tasks), Reddit, LinkedIn, Slack, Notion, Discord, Google Maps and Cursor. It can also search the live internet.
 
 Delegate to the backend when:
 - the request needs data from, or an action on, one of those accounts;
+- the answer depends on news, current events, prices or anything that may have changed recently;
 - a correction changes work already requested;
 - the answer needs a lookup or careful reasoning.
+
+Never answer a question about current events or the caller's own data from memory — the backend has the live sources and you do not.
 
 Do not delegate for greetings, thanks, small talk, or anything you can already answer from the conversation.
 
