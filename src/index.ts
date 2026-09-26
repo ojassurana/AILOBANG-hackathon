@@ -1201,15 +1201,6 @@ function renderConnectionsPage(
       }
       .btn:hover { opacity: 0.88; }
       .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); }
-      .soon {
-        margin: 18px 0 0;
-        padding: 16px;
-        border: 1px dashed var(--border);
-        border-radius: 14px;
-        text-align: center;
-        color: var(--muted);
-        font-size: 14px;
-      }
       .call {
         display: flex;
         align-items: center;
@@ -1363,7 +1354,6 @@ ${groupRows}
 ${rows}
         </table>
       </div>
-      <p class="soon">More connectors coming soon</p>
       <a class="call" href="/call">
         <span class="callicon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"

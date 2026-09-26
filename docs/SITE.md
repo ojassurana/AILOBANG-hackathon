@@ -155,8 +155,7 @@ trigger it by prefetching — behind a `confirm()` prompt. It deletes every conn
 holds for that toolkit (`DELETE /connected_accounts/{id}`), since one toolkit can hold several,
 then returns to the table with a confirmation. `GET` on that path returns 405.
 
-A dashed "More connectors coming soon" card sits under the table, followed by a **Call your
-accounts** card that links to `/call`.
+Under the table sits the **Call your accounts** card that links to `/call`.
 
 ## Calling your accounts (GPT-Live + a backend harness)
 
