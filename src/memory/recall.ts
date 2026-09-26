@@ -62,7 +62,7 @@ export async function recall(deps: RecallDeps, request: string, conversation: st
           none: "The request needs no stored memory: a greeting, small talk, a general question, or everything needed is said in the conversation itself.",
           personal: "The request refers to a person, place, preference or habit of the caller's that is not spelled out in the conversation (a name they want to message, share with or send to, 'my sister', 'the usual', 'like last time').",
           workflow: "The request is a multi-step job with their apps that may have been done before, and needs no personal detail beyond what was said.",
-          both: "The request is a multi-step job with their apps and also refers to a person, place or preference not spelled out.",
+          both: "The request is a job with their apps that also names a person, place or preference. Sharing, sending or messaging someone is both — not only a job, and not only a person.",
         },
       },
     },

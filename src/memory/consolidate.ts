@@ -1,10 +1,11 @@
 /**
  * Writing memory: what a conversation leaves behind.
  *
- * Runs after the work, never in the caller's way. Jev makes the first call,
- * one yes/no per branch — is there a personal fact worth keeping, is there a
- * reusable procedure — and a branch at or under the bar is left alone. For each branch it picked, the
- * writer model plans upserts and deletes against the branch's outline. Before
+ * Runs after the work, never in the caller's way. Jev makes the first call:
+ * a yes/no for personal, a yes/no for workflow, and a yes/no for both. A
+ * branch at or under the bar is left alone unless `both` is above it, in
+ * which case personal and workflow are both written. For each branch it
+ * picked, the writer model plans upserts and deletes against the branch's outline. Before
  * a new node is created, Vector Search looks for one that already means the
  * same thing and Jev says whether it is the same; if so the write lands there
  * instead, so the tree does not grow twins. Every step is logged.
@@ -53,8 +54,8 @@ export async function consolidate(deps: ConsolidateDeps, input: ConsolidateInput
   const work = input.work?.trim().slice(-WORK_CHARS) || null;
   if (!conversation && !work) return { route: "none", confidence: 1, applied: [], skipped: ["nothing to read"] };
 
-  // Two independent questions, not one four-way choice: a job done for someone
-  // new is both a procedure and a person, and a single pick files it as one.
+  // Independent yes/no questions, including both: a job done for someone new
+  // is a procedure and a person, and those must not compete for one slot.
   const routed = await deps.jev(
     { conversation, work_record: work ?? "(no tools were used)" },
     {
@@ -78,22 +79,41 @@ export async function consolidate(deps: ConsolidateDeps, input: ConsolidateInput
           false: "No tools were used, a single simple action, a failed attempt, or a question answered from live data.",
         },
       },
+      both: {
+        type: "noul",
+        instructions:
+          "This should be written to both personal memory and workflow memory. A job done for a named person " +
+          "(share with, send to, message, invite) is both: the person and how to reach them, and the procedure. " +
+          "Do not treat that as only a workflow.",
+        criteria: {
+          true: "A reusable job happened that involved a person, place or preference of the caller's, so both sides should be updated.",
+          false: "Only one kind of memory applies, or nothing durable was learned.",
+        },
+      },
     },
   );
-  const probabilities: Record<Branch, number> = {
+  const probabilities: Record<Branch | "both", number> = {
     personal: noulOf(routed.answers, "personal") ?? 0,
     workflow: noulOf(routed.answers, "workflow") ?? 0,
+    both: noulOf(routed.answers, "both") ?? 0,
   };
   const contacts = findContacts(conversation, work);
-  const branches = BRANCHES.filter((branch) => probabilities[branch] > WRITE_CONFIDENCE);
+  const pickedBoth = probabilities.both > WRITE_CONFIDENCE;
+  const wanted = new Set<Branch>();
+  for (const branch of BRANCHES) {
+    if (probabilities[branch] > WRITE_CONFIDENCE || pickedBoth) wanted.add(branch);
+  }
   // A name plus how to reach them is always personal memory, even when Jev
   // reads the turn as only a job (that is what happened with Himanshu).
-  const forced = contacts.length > 0 && !branches.includes("personal");
-  if (forced) branches.push("personal");
+  const forced = contacts.length > 0 && !wanted.has("personal");
+  if (contacts.length) wanted.add("personal");
+  const branches = BRANCHES.filter((branch) => wanted.has(branch));
   const choice: WriteRoute = branches.length === 2 ? "both" : branches[0] ?? "none";
-  const confidence = branches.length
-    ? Math.min(...branches.map((branch) => probabilities[branch] || (branch === "personal" && forced ? 1 : 0)))
-    : 1 - Math.max(probabilities.personal, probabilities.workflow);
+  const confidence = pickedBoth
+    ? probabilities.both
+    : branches.length
+      ? Math.min(...branches.map((branch) => probabilities[branch] || (branch === "personal" && forced ? 1 : 0)))
+      : 1 - Math.max(probabilities.personal, probabilities.workflow, probabilities.both);
 
   await deps.repo.log({
     userId: deps.userId,
@@ -104,6 +124,7 @@ export async function consolidate(deps: ConsolidateDeps, input: ConsolidateInput
       route: choice,
       confidence,
       probabilities,
+      pickedBoth,
       forced,
       contacts: contacts.map((contact) => ({ name: contact.name, email: contact.email })),
       costUsd: routed.costUsd,

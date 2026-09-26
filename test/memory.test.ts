@@ -299,9 +299,13 @@ function fakeWriteRepo(nodes: MemoryNode[]) {
   };
 }
 
-/** Jev's answer to the write pass: one probability per branch. */
-function saveNouls(personal: number, workflow: number): Record<string, JevAnswer> {
-  return { personal: { type: "noul", noul: personal }, workflow: { type: "noul", noul: workflow } };
+/** Jev's answer to the write pass: one probability per branch, and for both. */
+function saveNouls(personal: number, workflow: number, both = 0): Record<string, JevAnswer> {
+  return {
+    personal: { type: "noul", noul: personal },
+    workflow: { type: "noul", noul: workflow },
+    both: { type: "noul", noul: both },
+  };
 }
 
 check("consolidate writes nothing when Jev says no to both, or is only at the bar", async () => {
@@ -410,6 +414,25 @@ check("a name plus an email is kept even when Jev calls the turn only a job", as
   assert.deepEqual(seen.sort(), ["personal", "workflow"]);
   assert.ok(repo.writes.includes("workflow/google-docs/create-and-share"));
   assert.ok(repo.writes.includes("personal/relationships/contacts/himanshu"), `writes: ${repo.writes.join(",")}`);
+});
+
+check("Jev saying both writes personal and workflow even when each side is under the bar", async () => {
+  const repo = fakeWriteRepo([]);
+  const seen: string[] = [];
+  const writer: Writer = async (input) => {
+    seen.push(input.branch);
+    const person = { op: "upsert" as const, path: "personal/preferences/docs", kind: "skill" as const, title: "Docs", summary: "", content: "The caller likes Google Docs titled plainly.", code: null, inputs: [], tools: [], reason: "" };
+    const job = { op: "upsert" as const, path: "workflow/google-docs/create", kind: "skill" as const, title: "Create a doc", summary: "", content: "Create a Google Doc with the requested title.", code: null, inputs: ["title"], tools: [], reason: "" };
+    return { note: "", operations: [input.branch === "personal" ? person : job] };
+  };
+  const jev = scriptedJev([() => saveNouls(0.2, 0.2, 0.82)]);
+  const result = await consolidate(
+    { repo, jev, writer, userId: "u1" },
+    { source: "call", conversation: "Caller: make a Google Doc called Things to do and keep the titles short like I always want", work: "GOOGLESUPER_CREATE_DOCUMENT_MARKDOWN ok" },
+  );
+  assert.equal(result.route, "both");
+  assert.deepEqual(seen, ["personal", "workflow"]);
+  assert.deepEqual(repo.writes, ["personal/preferences/docs", "workflow/google-docs/create"]);
 });
 
 await Promise.all(checks);
