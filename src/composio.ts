@@ -157,3 +157,25 @@ export async function createConnectLink(
   if (!data.redirect_url) throw new Error("composio link response had no redirect_url");
   return data.redirect_url;
 }
+
+/** Every connection this user holds for one toolkit — a user may have several. */
+export async function listAccountIds(
+  apiKey: string,
+  userId: string,
+  toolkitSlug: string,
+): Promise<string[]> {
+  const query = new URLSearchParams({ user_ids: userId, limit: "100" });
+  const data = await composioFetch<{ items?: RawAccount[] }>(
+    apiKey,
+    `/connected_accounts?${query.toString()}`,
+  );
+
+  return (data.items ?? [])
+    .filter((item) => item.toolkit?.slug === toolkitSlug && item.id)
+    .map((item) => item.id as string);
+}
+
+/** Removes a connected account from Composio. */
+export async function deleteConnectedAccount(apiKey: string, accountId: string): Promise<void> {
+  await composioFetch<unknown>(apiKey, `/connected_accounts/${accountId}`, { method: "DELETE" });
+}

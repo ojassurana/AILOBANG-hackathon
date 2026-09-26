@@ -15,6 +15,8 @@ import {
 } from "./connectors";
 import {
   createConnectLink,
+  deleteConnectedAccount,
+  listAccountIds,
   listConnectedAccounts,
   type ConnectedAccount,
 } from "./composio";
@@ -73,11 +75,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
+  // Disconnecting is a mutation, so it only accepts POST from the table's form.
+  if (path.startsWith("/disconnect/")) {
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return disconnectToolkit(request, env, path.slice("/disconnect/".length));
+  }
+
   if (request.method !== "GET" && request.method !== "HEAD") {
-    return new Response("Method Not Allowed", {
-      status: 405,
-      headers: { Allow: "GET, HEAD" },
-    });
+    return methodNotAllowed("GET, HEAD");
   }
 
   // Composio sends the browser back here after a connection attempt, so this
@@ -120,6 +125,10 @@ function redirect(path: string, request: Request): Response {
     status: 302,
     headers: { Location: new URL(path, request.url).toString(), "Cache-Control": "no-store" },
   });
+}
+
+function methodNotAllowed(allow: string): Response {
+  return new Response("Method Not Allowed", { status: 405, headers: { Allow: allow } });
 }
 
 /* ------------------------------------------------------------------ login */
@@ -242,6 +251,8 @@ async function appPage(request: Request, env: Env): Promise<Response> {
 
   const url = new URL(request.url);
   const justConnected = url.searchParams.get("connected");
+  const justDisconnected = url.searchParams.get("disconnected");
+  const disconnectFailed = url.searchParams.get("disconnect_failed");
   const denied = url.searchParams.get("error");
 
   let accounts = new Map<string, ConnectedAccount>();
@@ -253,7 +264,13 @@ async function appPage(request: Request, env: Env): Promise<Response> {
     warning = "We couldn't reach the connector service. Refresh to try again.";
   }
 
-  const html = renderConnectionsPage(session, accounts, { justConnected, denied, warning });
+  const html = renderConnectionsPage(session, accounts, {
+    justConnected,
+    justDisconnected,
+    disconnectFailed,
+    denied,
+    warning,
+  });
   return new Response(html, {
     headers: { "Content-Type": "text/html;charset=utf-8", "Cache-Control": "no-store" },
   });
@@ -295,6 +312,39 @@ async function startConnect(request: Request, env: Env, slug: string): Promise<R
   }
 }
 
+/** Removes the user's connection(s) for one toolkit. */
+async function disconnectToolkit(request: Request, env: Env, slug: string): Promise<Response> {
+  const session = await currentSession(request, env);
+  if (!session) return redirect("/signin", request);
+
+  const connector = connectorBySlug(slug);
+  if (!connector) {
+    return errorPage(404, "Unknown connector", "That connector isn't available.", {
+      back: { href: "/app", label: "Back to your accounts" },
+    });
+  }
+
+  const target = new URL("/app", request.url);
+
+  try {
+    // A toolkit can hold more than one connection; disconnecting the app means
+    // clearing all of them.
+    const accountIds = await listAccountIds(env.COMPOSIO_API_KEY, session.sub, connector.slug);
+    for (const accountId of accountIds) {
+      await deleteConnectedAccount(env.COMPOSIO_API_KEY, accountId);
+    }
+    if (accountIds.length) target.searchParams.set("disconnected", connector.slug);
+  } catch (error) {
+    console.error("composio disconnect failed", error);
+    target.searchParams.set("disconnect_failed", connector.slug);
+  }
+
+  return new Response(null, {
+    status: 302,
+    headers: { Location: target.toString(), "Cache-Control": "no-store" },
+  });
+}
+
 /** Composio redirects here after the user finishes (or abandons) a connection. */
 async function finishConnect(request: Request, env: Env, path: string): Promise<Response> {
   const session = await currentSession(request, env);
@@ -317,7 +367,13 @@ async function finishConnect(request: Request, env: Env, path: string): Promise<
 function renderConnectionsPage(
   session: Session,
   accounts: Map<string, ConnectedAccount>,
-  flash: { justConnected: string | null; denied: string | null; warning: string | null },
+  flash: {
+    justConnected: string | null;
+    justDisconnected: string | null;
+    disconnectFailed: string | null;
+    denied: string | null;
+    warning: string | null;
+  },
 ): string {
   const connected = CONNECTORS.filter((c) => accounts.get(c.slug)?.status === "ACTIVE").length;
 
@@ -338,6 +394,12 @@ function renderConnectionsPage(
     } else {
       banner = `<p class="note bad">We didn't get a confirmation from ${escapeHtml(name)}. You can try again below.</p>`;
     }
+  } else if (flash.justDisconnected) {
+    const name = connectorBySlug(flash.justDisconnected)?.name ?? "That account";
+    banner = `<p class="note info">${escapeHtml(name)} disconnected.</p>`;
+  } else if (flash.disconnectFailed) {
+    const name = connectorBySlug(flash.disconnectFailed)?.name ?? "that account";
+    banner = `<p class="note bad">We couldn't disconnect ${escapeHtml(name)}. Please try again.</p>`;
   } else if (flash.warning) {
     banner = `<p class="note bad">${escapeHtml(flash.warning)}</p>`;
   }
@@ -393,6 +455,19 @@ function renderConnectionsPage(
       .note { margin: 24px 0 0; padding: 12px 14px; border-radius: 12px; font-size: 14px; }
       .note.ok { background: rgba(26, 155, 82, 0.10); border: 1px solid rgba(26, 155, 82, 0.26); }
       .note.wait { background: rgba(201, 134, 26, 0.10); border: 1px solid rgba(201, 134, 26, 0.26); }
+      .note.info { background: rgba(127, 127, 127, 0.10); border: 1px solid var(--border); }
+      form.inline { display: inline; margin-left: 12px; }
+      button.link {
+        background: none;
+        border: 0;
+        padding: 0;
+        font: inherit;
+        font-size: 13.5px;
+        color: var(--muted);
+        text-decoration: underline;
+        cursor: pointer;
+      }
+      button.link:hover { color: var(--fg); }
       .note.bad { background: rgba(192, 57, 43, 0.10); border: 1px solid rgba(192, 57, 43, 0.26); }
       .card {
         margin-top: 28px;
@@ -429,12 +504,29 @@ function renderConnectionsPage(
       }
       .btn:hover { opacity: 0.88; }
       .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+      .soon {
+        margin: 18px 0 0;
+        padding: 16px;
+        border: 1px dashed var(--border);
+        border-radius: 14px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 14px;
+      }
       @media (max-width: 560px) {
         .bl, .who { display: none; }
         .shell { padding: 32px 14px 56px; }
         td { padding: 12px 12px; }
         .btn { padding: 8px 11px; font-size: 13px; }
-        .acct { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+        /* Wrap rather than clamp: a wide account label sets the whole column's
+           width and pushes the table past the viewport. */
+        .acct { white-space: normal; overflow-wrap: anywhere; max-width: 120px; }
+        /* Let the action cell shrink and wrap; a fixed 1% width plus nowrap made
+           the whole table wider than the viewport once a row had two actions. */
+        .act { width: auto; white-space: normal; }
+        form.inline { margin-left: 8px; }
+        /* Keep the button on one line on narrow screens. */
+        .sm-hide { display: none; }
       }
     </style>
   </head>
@@ -453,6 +545,7 @@ ${banner}
 ${rows}
         </table>
       </div>
+      <p class="soon">More connectors coming soon</p>
     </div>
   </body>
 </html>`;
@@ -476,8 +569,12 @@ function connectorRow(connector: Connector, account: ConnectedAccount | undefine
 
   const action =
     status === "ACTIVE"
-      ? `<a class="btn ghost" href="/connect/${connector.slug}">Reconnect</a>`
-      : `<a class="btn" href="/connect/${connector.slug}">Connect now</a>`;
+      ? `<a class="btn ghost" href="/connect/${connector.slug}">Reconnect</a>
+              <form class="inline" method="post" action="/disconnect/${connector.slug}"
+                    onsubmit="return confirm('Disconnect ${escapeHtml(connector.name)}?')">
+                <button class="link" type="submit">Disconnect</button>
+              </form>`
+      : `<a class="btn" href="/connect/${connector.slug}">Connect<span class="sm-hide"> now</span></a>`;
 
   return `          <tr>
             <td>

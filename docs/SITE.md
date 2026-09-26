@@ -16,6 +16,7 @@ Live at **https://ailobang.com**
 | `GET /app` | The post-login **Connect your accounts** page; redirects to `/signin` when signed out |
 | `GET /connect/<toolkit>` | Creates a Composio Connect Link for that toolkit and redirects to it |
 | `GET /connect/return/<toolkit>` | Composio's callback; returns the browser to `/app?connected=<toolkit>` |
+| `POST /disconnect/<toolkit>` | Disconnects that toolkit: deletes the user's Composio connection(s) for it |
 | `GET /auth/logout` | Ends the WorkOS session and clears the local cookie |
 
 ## How authentication works
@@ -105,6 +106,14 @@ The flow:
 3. After the user consents, Composio sends the browser to `/connect/return/<toolkit>`, which
    redirects to `/app?connected=<toolkit>` and shows a confirmation.
 4. `/app` reads state from `GET /api/v3.1/connected_accounts?user_ids=<user id>`.
+
+Connected rows show the account and two actions: **Reconnect** (a fresh Connect Link) and
+**Disconnect**. Disconnect is a `POST` from a small form — not a `GET` link, so nothing can
+trigger it by prefetching — behind a `confirm()` prompt. It deletes every connection the user
+holds for that toolkit (`DELETE /connected_accounts/{id}`), since one toolkit can hold several,
+then returns to the table with a confirmation. `GET` on that path returns 405.
+
+A dashed "More connectors coming soon" card sits under the table.
 
 **Auth configs.** Composio requires an `auth_config_id` per toolkit. All of them are
 Composio-managed OAuth2 configs (`is_composio_managed: true`), so the project needs no OAuth
